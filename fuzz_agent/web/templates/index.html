@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block main %}
+<header class="topbar">
+  <h1>Fuzz Agent</h1>
+  <div id="flash"></div>
+</header>
+
+<section class="panel">
+  <h2>New campaign</h2>
+  <form hx-post="/api/campaigns" hx-target="#flash" hx-swap="innerHTML">
+    <label>Path <input name="path" required></label>
+    <label>Seconds <input name="time_sec" type="number" min="1" value="60" required></label>
+    <label>Engine
+      <select name="engine">
+        <option value="libfuzzer">libfuzzer</option>
+        <option value="atheris">atheris</option>
+      </select>
+    </label>
+    <button type="submit">Start</button>
+  </form>
+</section>
+
+<div id="campaign-table"
+     hx-get="/?fragment=table"
+     hx-trigger="every 5s"
+     hx-swap="outerHTML"
+     hx-select="#campaign-table">
+  <table>
+    <thead>
+      <tr>
+        <th>cid</th>
+        <th>status</th>
+        <th>created_at</th>
+        <th>edges_covered</th>
+        <th>unique_crashes</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for c in campaigns %}
+      <tr>
+        <td><a href="/campaigns/{{ c.cid }}">{{ c.cid }}</a></td>
+        <td><span class="status">{{ c.status }}</span></td>
+        <td>{{ c.created_at }}</td>
+        <td>{{ c.stats.edges_covered if c.stats else 0 }}</td>
+        <td>{{ c.stats.unique_crashes if c.stats else 0 }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">No campaigns yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

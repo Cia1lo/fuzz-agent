@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block main %}
+<header class="topbar">
+  <div>
+    <a href="/">Campaigns</a>
+    <h1>{{ cid }}</h1>
+  </div>
+  <button hx-post="/api/campaigns/{{ cid }}/stop" hx-target="#stop-result">Stop</button>
+</header>
+<div id="stop-result"></div>
+
+{% set stats = summary.stats or {} %}
+<section class="panel summary">
+  <div><span>status</span><strong id="status">{{ stats.status or "pending" }}</strong></div>
+  <div><span>elapsed</span><strong id="elapsed">{{ stats.elapsed_sec or 0 }}</strong></div>
+  <div><span>time_budget</span><strong>{{ meta.time_budget_sec or "" }}</strong></div>
+</section>
+
+<section class="panel"
+         hx-get="/api/campaigns/{{ cid }}/stats"
+         hx-trigger="load, every 2s"
+         hx-swap="none">
+  <h2>Stats</h2>
+  <div class="stats-grid">
+    <div><span>execs/sec</span><strong id="execs_per_sec">{{ stats.execs_per_sec or 0 }}</strong></div>
+    <div><span>edges</span><strong id="edges_covered">{{ stats.edges_covered or 0 }}</strong></div>
+    <div><span>crashes</span><strong id="unique_crashes">{{ stats.unique_crashes or 0 }}</strong></div>
+  </div>
+</section>
+
+<section class="panel"
+         hx-get="/api/campaigns/{{ cid }}/crashes"
+         hx-trigger="load, every 5s"
+         hx-swap="none">
+  <h2>Crashes</h2>
+  <table>
+    <thead><tr><th>id</th><th>severity</th><th>sanitizer</th><th>stack</th></tr></thead>
+    <tbody id="crash-table">
+      {% for c in crashes %}
+      <tr>
+        <td>{{ c.crash_id }}</td>
+        <td>{{ c.severity or "" }}</td>
+        <td>{{ c.sanitizer_kind or "" }}</td>
+        <td>{{ c.stack_hash }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">No crashes.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Live events</h2>
+  <ul id="event-stream"></ul>
+</section>
+
+<script>
+const cid = {{ cid|tojson }};
+const source = new EventSource(`/api/campaigns/${cid}/events`);
+const list = document.getElementById("event-stream");
+
+function addEvent(name, event) {
+  const data = JSON.parse(event.data);
+  const li = document.createElement("li");
+  li.className = name === "replay" ? "replay" : (data.kind || name);
+  li.textContent = `[${data.ts || ""}] ${data.kind || name} ${JSON.stringify(data.payload || {})}`;
+  list.prepend(li);
+  while (list.children.length > 200) list.lastElementChild.remove();
+}
+
+["replay", "new_coverage", "new_crash", "plateau", "oom", "timeout", "engine_error", "heartbeat"]
+  .forEach((kind) => source.addEventListener(kind, (event) => addEvent(kind, event)));
+
+document.body.addEventListener("htmx:afterRequest", (event) => {
+  const path = event.detail.pathInfo.requestPath;
+  if (!event.detail.successful || !path.includes(`/api/campaigns/${cid}/`)) return;
+  const data = JSON.parse(event.detail.xhr.responseText || "null");
+  if (path.endsWith("/stats")) {
+    ["status", "elapsed_sec", "execs_per_sec", "edges_covered", "unique_crashes"].forEach((key) => {
+      const el = document.getElementById(key === "elapsed_sec" ? "elapsed" : key);
+      if (el && data[key] !== undefined) el.textContent = data[key];
+    });
+  }
+  if (path.endsWith("/crashes")) {
+    const body = document.getElementById("crash-table");
+    body.innerHTML = data.length ? data.map((c) =>
+      `<tr><td>${c.crash_id}</td><td>${c.severity || ""}</td><td>${c.sanitizer_kind || ""}</td><td>${c.stack_hash}</td></tr>`
+    ).join("") : `<tr><td colspan="4" class="muted">No crashes.</td></tr>`;
+  }
+});
+</script>
+{% endblock %}
