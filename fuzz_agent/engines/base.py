@@ -35,7 +35,7 @@ class FuzzEngine(ABC):
 
     # ---- run ----
     @abstractmethod
-    async def run(self, cfg: CampaignConfig) -> AsyncIterator[FuzzEvent]:
+    def run(self, cfg: CampaignConfig) -> AsyncIterator[FuzzEvent]:
         """Start the campaign and yield FuzzEvents as they arrive.
 
         Implementations must:

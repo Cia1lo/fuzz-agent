@@ -1,0 +1,205 @@
+"""Decision policy for the outer agent harness loop."""
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any
+
+from .observation import AgentObservation, HarnessAttemptObservation
+
+
+class HarnessAction(str, Enum):
+    ACCEPT_HARNESS = "accept_harness"
+    REGENERATE_HARNESS = "regenerate_harness"
+    PATCH_HARNESS = "patch_harness"
+    ADD_SEED = "add_seed"
+    ADD_DICTIONARY = "add_dictionary"
+    CHANGE_ENTRY_POINT = "change_entry_point"
+    STOP_FAILED = "stop_failed"
+
+
+@dataclass(frozen=True)
+class HarnessDecision:
+    action: HarnessAction
+    reason: str
+    payload: dict[str, Any] = field(default_factory=dict)
+
+
+class HarnessPolicy:
+    """Default deterministic policy; LLM-backed policies can implement this shape."""
+
+    def decide(
+        self,
+        observation: HarnessAttemptObservation,
+        *,
+        attempt: int,
+        max_attempts: int,
+    ) -> HarnessDecision:
+        if observation.is_accepted:
+            return HarnessDecision(
+                action=HarnessAction.ACCEPT_HARNESS,
+                reason="all validations passed",
+            )
+        if attempt >= max_attempts:
+            return HarnessDecision(
+                action=HarnessAction.STOP_FAILED,
+                reason="attempt budget exhausted",
+            )
+        return HarnessDecision(
+            action=HarnessAction.REGENERATE_HARNESS,
+            reason="validation or build feedback requires another harness attempt",
+        )
+
+
+class CoverageStrategyPolicy:
+    """Default policy for coverage plateau observations."""
+
+    def decide(self, observation: AgentObservation) -> HarnessDecision:
+        if observation.kind != "coverage_plateau":
+            return HarnessDecision(
+                action=HarnessAction.STOP_FAILED,
+                reason=f"unsupported coverage policy observation: {observation.kind}",
+            )
+        return HarnessDecision(
+            action=HarnessAction.ADD_DICTIONARY,
+            reason="coverage plateau should try coverage-guided seed and dictionary mutation",
+            payload={"hint": observation.summary},
+        )
+
+
+class LLMHarnessPolicy(HarnessPolicy):
+    """LLM-backed policy that still returns only validated structured decisions."""
+
+    _SYSTEM = """You choose the next action for a fuzz harness engineering loop.
+Return strict JSON only:
+{"action": "...", "reason": "...", "payload": {...}}
+Allowed actions:
+- accept_harness
+- regenerate_harness
+- patch_harness
+- add_seed
+- add_dictionary
+- change_entry_point
+- stop_failed
+Do not include prose or markdown."""
+
+    def decide(
+        self,
+        observation: HarnessAttemptObservation,
+        *,
+        attempt: int,
+        max_attempts: int,
+    ) -> HarnessDecision:
+        if observation.is_accepted:
+            return HarnessDecision(
+                action=HarnessAction.ACCEPT_HARNESS,
+                reason="all validations passed",
+            )
+        if attempt >= max_attempts:
+            return HarnessDecision(
+                action=HarnessAction.STOP_FAILED,
+                reason="attempt budget exhausted",
+            )
+        try:
+            from ..subagents._llm import call_llm_json
+
+            raw = call_llm_json(
+                self._SYSTEM,
+                _observation_prompt(observation, attempt, max_attempts),
+                max_tokens=512,
+            )
+            return _parse_llm_decision(raw, observation)
+        except Exception as exc:  # noqa: BLE001
+            return HarnessDecision(
+                action=HarnessAction.REGENERATE_HARNESS,
+                reason=f"llm_policy_failed: {type(exc).__name__}: {exc}",
+                payload={"fallback": True},
+            )
+
+
+def _parse_llm_decision(
+    raw: Any,
+    observation: HarnessAttemptObservation | None = None,
+) -> HarnessDecision:
+    if not isinstance(raw, dict):
+        raise ValueError("policy output must be an object")
+    action_raw = raw.get("action")
+    if not isinstance(action_raw, str):
+        raise ValueError("policy output action must be a string")
+    try:
+        action = HarnessAction(action_raw)
+    except ValueError as exc:
+        raise ValueError(f"unknown harness action: {action_raw}") from exc
+    reason = raw.get("reason")
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("policy output reason must be a non-empty string")
+    payload = raw.get("payload", {})
+    if not isinstance(payload, dict):
+        raise ValueError("policy output payload must be an object")
+    payload = _validate_payload(action, payload, observation)
+    return HarnessDecision(action=action, reason=reason, payload=payload)
+
+
+def _validate_payload(
+    action: HarnessAction,
+    payload: dict[str, Any],
+    observation: HarnessAttemptObservation | None,
+) -> dict[str, Any]:
+    if action is HarnessAction.PATCH_HARNESS:
+        path = payload.get("path")
+        patch = payload.get("patch")
+        if not isinstance(path, str) or not path:
+            raise ValueError("patch_harness payload requires string path")
+        if patch is not None and not isinstance(patch, str):
+            raise ValueError("patch_harness payload patch must be a string")
+        if observation and observation.source_path is not None:
+            requested = Path(path).expanduser()
+            allowed = observation.source_path.resolve()
+            if requested.resolve() != allowed:
+                raise ValueError("patch_harness path must be the current harness source")
+    elif action is HarnessAction.ADD_SEED:
+        name = payload.get("name")
+        bytes_b64 = payload.get("bytes_b64")
+        if not isinstance(name, str) or not name or "/" in name:
+            raise ValueError("add_seed payload requires safe string name")
+        if not isinstance(bytes_b64, str) or not bytes_b64:
+            raise ValueError("add_seed payload requires bytes_b64")
+    elif action is HarnessAction.ADD_DICTIONARY:
+        tokens = payload.get("tokens", [])
+        if not isinstance(tokens, list) or not all(isinstance(t, str) for t in tokens):
+            raise ValueError("add_dictionary payload tokens must be a string list")
+    elif action is HarnessAction.CHANGE_ENTRY_POINT:
+        entry = payload.get("entry")
+        if not isinstance(entry, str) or not entry:
+            raise ValueError("change_entry_point payload requires entry")
+    elif action in {
+        HarnessAction.ACCEPT_HARNESS,
+        HarnessAction.REGENERATE_HARNESS,
+        HarnessAction.STOP_FAILED,
+    }:
+        if payload and not isinstance(payload, dict):
+            raise ValueError("payload must be an object")
+    return payload
+
+
+def _observation_prompt(
+    observation: HarnessAttemptObservation,
+    attempt: int,
+    max_attempts: int,
+) -> str:
+    validations = [
+        {"name": v.name, "passed": v.passed, "detail": v.detail}
+        for v in observation.validations
+    ]
+    score = observation.score.__dict__ if observation.score is not None else {}
+    return (
+        f"Attempt: {attempt}/{max_attempts}\n"
+        f"Entry: {observation.entry}\n"
+        f"Engine: {observation.engine.value}\n"
+        f"Build passed: {observation.build_passed}\n"
+        f"Diagnostics:\n{observation.diagnostics[-4000:]}\n\n"
+        f"Validations: {validations}\n"
+        f"Score: {score}\n"
+        "Choose the next action."
+    )

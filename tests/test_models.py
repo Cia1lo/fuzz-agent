@@ -2,7 +2,7 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from fuzz_agent.state.models import CampaignStatus, CrashRecord, EventKind, Language, Severity
+from fuzz_agent.state.models import CampaignStatus, CrashRecord, EngineKind, EventKind, Language, Severity
 
 
 def test_crash_record_asdict_roundtrip_preserves_types():
@@ -33,5 +33,6 @@ def test_enum_string_values_are_stable():
     assert EventKind.NEW_COVERAGE.value == "new_coverage"
     assert EventKind.NEW_CRASH.value == "new_crash"
     assert EventKind.PLATEAU.value == "plateau"
+    assert EngineKind.CARGO_FUZZ.value == "cargo-fuzz"
     assert Language.RUST.value == "rust"
     assert Severity.CRITICAL.value == "critical"

@@ -1,0 +1,3 @@
+[
+  {"file": "parser.cc", "func": "ParseThing", "lines": "5-7"}
+]

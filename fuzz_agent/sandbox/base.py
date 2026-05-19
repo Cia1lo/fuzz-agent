@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
+from typing import Sequence
 
 
 class Sandbox(ABC):
@@ -15,7 +16,7 @@ class Sandbox(ABC):
         self,
         cmd: list[str],
         *,
-        mounts: list[tuple[Path, Path, str]] = (),
+        mounts: Sequence[tuple[Path, Path, str]] = (),
         memory_mb: int | None = None,
         cpu_seconds: int | None = None,
         network: bool = False,

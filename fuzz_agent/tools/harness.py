@@ -6,5 +6,8 @@ from ..subagents import harness_writer
 
 
 def generate_harness_impl(target: TargetProfile, entry: str,
-                          engine: EngineKind, invariants: list[str]) -> HarnessSpec:
-    return harness_writer(target, entry, engine, invariants)
+                          engine: EngineKind, invariants: list[str], *,
+                          attempt: int = 1,
+                          diagnostics: str | None = None) -> HarnessSpec:
+    return harness_writer(target, entry, engine, invariants,
+                          attempt=attempt, diagnostics=diagnostics)

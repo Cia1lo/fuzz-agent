@@ -5,48 +5,49 @@ event loop and pipes events through the EventBus + CampaignStore.
 """
 from __future__ import annotations
 
-import asyncio
 import shutil
 from pathlib import Path
 from typing import Optional
 from datetime import datetime, timezone
 
+from ..engines.base import FuzzEngine
 from ..state.models import (
     BuildArtifact,
     CampaignConfig,
     CampaignStats,
     CampaignStatus,
+    EventKind,
+    FuzzEvent,
 )
-from ._runtime import runtime
+from ._runtime import Runtime, runtime
 
 
-async def _drive(rt, cid: str, eng, cfg: CampaignConfig) -> None:
+async def _drive(rt: Runtime, cid: str, eng: FuzzEngine, cfg: CampaignConfig) -> None:
     rt.store.update_status(cid, CampaignStatus.RUNNING)
     try:
         async for ev in eng.run(cfg):
-            engine_cid = ev.campaign_id
-            ev = _retag(ev, cid)  # engine assigned its own id; rebind to ours
             rt.store.record_event(ev)
             rt.bus.publish(ev)
-            stats = eng.stats(engine_cid)
-            stats.campaign_id = cid
+            stats = eng.stats(cid)
             rt.store.record_stats(stats)
+        rt.store.record_stats(eng.stats(cid))
         if hasattr(eng, "collect_coverage"):
             try:
                 summary = eng.collect_coverage(cfg, cfg.artifact)
                 if summary is not None and summary.exists():
-                    coverage_path = rt.store.paths(cid)["coverage"]
-                    coverage_path.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(summary, coverage_path)
                     stats = rt.store.latest_stats(cid) or _pending_stats(cid)
-                    stats.edges_total = _edges_total_from_report(coverage_path)
+                    stats.edges_total = _edges_total_from_report(summary)
                     rt.store.record_stats(stats)
-            except Exception:
-                pass
+            except Exception as e:  # noqa: BLE001
+                rt.store.record_event(FuzzEvent(
+                    kind=EventKind.ENGINE_ERROR,
+                    campaign_id=cid,
+                    ts=datetime.now(timezone.utc),
+                    payload={"coverage_error": str(e)},
+                ))
         rt.store.update_status(cid, CampaignStatus.STOPPED)
     except Exception as e:  # noqa: BLE001
         rt.store.update_status(cid, CampaignStatus.FAILED)
-        from ..state.models import EventKind, FuzzEvent
         rt.store.record_event(FuzzEvent(
             kind=EventKind.ENGINE_ERROR, campaign_id=cid,
             ts=datetime.now(timezone.utc), payload={"error": str(e)},
@@ -54,11 +55,6 @@ async def _drive(rt, cid: str, eng, cfg: CampaignConfig) -> None:
     finally:
         rt.bus.close(cid)
         rt.running.pop(cid, None)
-
-
-def _retag(ev, cid: str):
-    ev.campaign_id = cid
-    return ev
 
 
 def _edges_total_from_report(path: Path) -> int | None:
@@ -87,21 +83,63 @@ def _pending_stats(cid: str) -> CampaignStats:
     )
 
 
+def _copy_seed_corpus(src: Path, dst: Path) -> None:
+    if not src.exists() or src.resolve() == dst.resolve():
+        return
+    dst.mkdir(parents=True, exist_ok=True)
+    for path in src.rglob("*"):
+        if path.is_file():
+            rel = path.relative_to(src)
+            out = dst / rel
+            out.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, out)
+
+
 def start_fuzz_campaign_impl(artifact: BuildArtifact, corpus_dir: Path,
                              time_budget_sec: int,
-                             dictionary_path: Optional[Path]) -> str:
+                             dictionary_path: Optional[Path],
+                             resumed_from: Optional[str] = None) -> str:
     rt = runtime()
     cfg = CampaignConfig(
         artifact=artifact, corpus_dir=corpus_dir,
         crash_dir=corpus_dir.parent / "crashes",
         dictionary_path=dictionary_path,
         time_budget_sec=time_budget_sec,
+        resumed_from=resumed_from,
     )
     cid = rt.store.new_campaign(cfg)
+    paths = rt.store.paths(cid)
+    _copy_seed_corpus(corpus_dir, paths["corpus_dir"])
+    cfg = CampaignConfig(
+        artifact=artifact,
+        corpus_dir=paths["corpus_dir"],
+        crash_dir=paths["crash_dir"],
+        dictionary_path=dictionary_path,
+        time_budget_sec=time_budget_sec,
+        campaign_id=cid,
+        resumed_from=resumed_from,
+    )
+    rt.store.update_meta(cid, cfg)
     eng = rt.engine(artifact.engine)
     fut = rt.submit(_drive(rt, cid, eng, cfg))
-    rt.running[cid] = (eng, fut)  # type: ignore[assignment]
+    rt.running[cid] = (eng, fut)
     return cid
+
+
+def resume_campaign_impl(campaign_id: str, time_budget_sec: Optional[int]) -> str:
+    rt = runtime()
+    cfg = rt.store.campaign_config(campaign_id)
+    if cfg is None:
+        raise KeyError(f"unknown campaign: {campaign_id}")
+    paths = rt.store.paths(campaign_id)
+    budget = time_budget_sec or cfg.time_budget_sec
+    return start_fuzz_campaign_impl(
+        cfg.artifact,
+        paths["corpus_dir"],
+        budget,
+        cfg.dictionary_path,
+        resumed_from=campaign_id,
+    )
 
 
 def query_status_impl(campaign_id: str) -> CampaignStats:

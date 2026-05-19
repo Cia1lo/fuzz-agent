@@ -29,9 +29,10 @@ def _sanitizer_kind(log: str) -> str | None:
     return m.group("kind") if m else None
 
 
-def _stack_hash(frames: list[str], fallback_bytes: bytes) -> str:
+def _stack_hash(frames: list[str], fallback_bytes: bytes, sanitizer_kind: str | None) -> str:
     if frames:
-        return hashlib.sha1("|".join(frames).encode()).hexdigest()[:16]
+        key = f"{sanitizer_kind or 'unknown'}|" + "|".join(frames)
+        return hashlib.sha1(key.encode()).hexdigest()[:16]
     return hashlib.sha1(fallback_bytes).hexdigest()[:16]
 
 
@@ -45,7 +46,7 @@ def run(campaign_id: str, raw_crash_dir: Path, top_n: int) -> list[CrashRecord]:
         log = _read_log(p)
         frames = _top_frames(log)
         san_kind = _sanitizer_kind(log)
-        h = _stack_hash(frames, p.read_bytes()[:4096])
+        h = _stack_hash(frames, p.read_bytes()[:4096], san_kind)
         if h in seen:
             continue
         seen[h] = CrashRecord(

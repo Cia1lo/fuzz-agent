@@ -1,4 +1,4 @@
-"""Subagent pool — context-isolated workers invoked via Claude Agent SDK.
+"""Subagent pool — context-isolated workers invoked via an LLM client.
 
 Each subagent has a narrow, well-typed contract (input → structured summary).
 The orchestrator never sees the raw context the subagent processes (large
@@ -12,18 +12,19 @@ Contract for every subagent function:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Any
 
-from ..state.models import CrashRecord, HarnessSpec, TargetProfile, EngineKind
+from ..state.models import CrashRecord, HarnessSpec, TargetProfile, EngineKind, VulnerabilityMatch
 
 
 # Each function below is a thin facade; the heavy lifting (LLM calls,
 # context packing) lives in the corresponding module.
 
 def harness_writer(target: TargetProfile, entry: str,
-                   engine: EngineKind, invariants: list[str]) -> HarnessSpec:
+                   engine: EngineKind, invariants: list[str], *,
+                   attempt: int = 1, diagnostics: str | None = None) -> HarnessSpec:
     from .harness_writer import run as _run
-    return _run(target, entry, engine, invariants)
+    return _run(target, entry, engine, invariants, attempt=attempt, diagnostics=diagnostics)
 
 
 def crash_triage(campaign_id: str, raw_crash_dir: Path,
@@ -40,7 +41,7 @@ def corpus_curator(target: TargetProfile, out_dir: Path,
 
 def coverage_analyst(campaign_id: str,
                      coverage_file: Path,
-                     source_root: Path) -> dict:
+                     source_root: Path) -> dict[str, Any]:
     """Return: {"uncovered": [...], "suggested_seeds": [...], "dict_additions": [...]}"""
     from .coverage_analyst import run as _run
     return _run(campaign_id, coverage_file, source_root)
@@ -50,3 +51,9 @@ def exploit_assessor(crash: CrashRecord, source_root: Path) -> CrashRecord:
     """Augments crash with severity + exploitability_notes."""
     from .exploit_assessor import run as _run
     return _run(crash, source_root)
+
+
+def vulnerability_matcher(crash: CrashRecord, report: str | None) -> list[VulnerabilityMatch]:
+    """Return rule-based vulnerability/CWE matches for a crash."""
+    from .vulnerability_matcher import run as _run
+    return _run(crash, report)

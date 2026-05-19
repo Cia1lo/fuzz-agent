@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from typing import Sequence
 
 from .base import Sandbox
 
@@ -20,7 +21,7 @@ class DockerSandbox(Sandbox):
         self,
         cmd: list[str],
         *,
-        mounts: list[tuple[Path, Path, str]] = (),
+        mounts: Sequence[tuple[Path, Path, str]] = (),
         memory_mb: int | None = None,
         cpu_seconds: int | None = None,
         network: bool = False,

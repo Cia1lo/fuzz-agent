@@ -3,10 +3,15 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import cast
 
 from ..orchestrator import CampaignGoal, Orchestrator
 from ..state.models import EngineKind
 from ..tools import _runtime
+
+
+def _engine_kind(name: str) -> EngineKind:
+    return EngineKind.CARGO_FUZZ if name == "cargo_fuzz" else EngineKind(name)
 
 
 def submit_campaign(path: str, time_sec: int, engine_name: str) -> str:
@@ -16,7 +21,7 @@ def submit_campaign(path: str, time_sec: int, engine_name: str) -> str:
     goal = CampaignGoal(
         target_path=Path(path),
         time_budget_sec=time_sec,
-        engine=EngineKind(engine_name),
+        engine=_engine_kind(engine_name),
     )
     orch = Orchestrator(rt.store, rt.bus)
     rt.submit(orch.run(goal))
@@ -25,10 +30,10 @@ def submit_campaign(path: str, time_sec: int, engine_name: str) -> str:
     while time.monotonic() < deadline:
         for row in rt.store.list_campaigns():
             if row["cid"] not in before:
-                return row["cid"]
+                return cast(str, row["cid"])
         time.sleep(0.2)
 
     campaigns = rt.store.list_campaigns()
     if not campaigns:
         raise RuntimeError("campaign did not become ready")
-    return campaigns[0]["cid"]
+    return cast(str, campaigns[0]["cid"])

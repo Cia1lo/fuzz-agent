@@ -9,16 +9,17 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, Union
 
 from ..state.models import EventKind, FuzzEvent
 
 _SENTINEL: object = object()
+_QueueItem = Union[FuzzEvent, object]
 
 
 class EventBus:
     def __init__(self) -> None:
-        self._queues: dict[str, list[asyncio.Queue]] = defaultdict(list)
+        self._queues: dict[str, list[asyncio.Queue[_QueueItem]]] = defaultdict(list)
         self._closed: set[str] = set()
 
     def publish(self, ev: FuzzEvent) -> None:
@@ -28,14 +29,15 @@ class EventBus:
             q.put_nowait(ev)
 
     async def subscribe(self, campaign_id: str) -> AsyncIterator[FuzzEvent]:
-        q: asyncio.Queue = asyncio.Queue()
+        q: asyncio.Queue[_QueueItem] = asyncio.Queue()
         self._queues[campaign_id].append(q)
         try:
             while True:
                 item = await q.get()
                 if item is _SENTINEL:
                     return
-                yield item  # type: ignore[misc]
+                assert isinstance(item, FuzzEvent)
+                yield item
         finally:
             try:
                 self._queues[campaign_id].remove(q)

@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 import json
+import os
+import ipaddress
 from collections import deque
+from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator, cast
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from ..tools import _runtime, stop_campaign
+from ..tools._runtime import Runtime
 from ._launcher import submit_campaign
 
 app = FastAPI(title="Fuzz Agent")
@@ -28,8 +32,30 @@ class CampaignRequest(BaseModel):
     engine: str
 
 
-def _rt():
+def _rt() -> Runtime:
     return _runtime.runtime()
+
+
+def _is_local_host(host: str | None) -> bool:
+    if host is None or host in {"testclient", "localhost"}:
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+@app.middleware("http")
+async def local_only(
+    request: Request,
+    call_next: Callable[[Request], Awaitable[Any]],
+) -> Any:
+    if os.environ.get("FUZZ_AGENT_WEB_ALLOW_REMOTE") == "1":
+        return await call_next(request)
+    host = request.client.host if request.client else None
+    if not _is_local_host(host):
+        return JSONResponse({"detail": "remote access disabled"}, status_code=403)
+    return await call_next(request)
 
 
 def _jsonable(value: Any) -> Any:
@@ -56,7 +82,7 @@ def _known_campaign(cid: str) -> bool:
     return any(row["cid"] == cid for row in _rt().store.list_campaigns())
 
 
-def _tail_events(cid: str, limit: int = 50) -> list[dict]:
+def _tail_events(cid: str, limit: int = 50) -> list[dict[str, Any]]:
     log_path = _rt().store.paths(cid)["events_log"]
     if not log_path.exists():
         return []
@@ -66,27 +92,33 @@ def _tail_events(cid: str, limit: int = 50) -> list[dict]:
             line = line.strip()
             if line:
                 lines.append(line)
-    events: list[dict] = []
+    events: list[dict[str, Any]] = []
     for line in lines:
         try:
-            events.append(json.loads(line))
+            events.append(cast(dict[str, Any], json.loads(line)))
         except json.JSONDecodeError:
             continue
     return events
 
 
-def _campaign_meta(cid: str) -> dict:
+def _campaign_meta(cid: str) -> dict[str, Any]:
     meta_path = _rt().store.paths(cid)["meta"]
     if not meta_path.exists():
         return {}
     try:
-        return json.loads(meta_path.read_text(encoding="utf-8"))
+        return cast(dict[str, Any], json.loads(meta_path.read_text(encoding="utf-8")))
     except json.JSONDecodeError:
         return {}
 
 
+def _read_text(path: Path) -> PlainTextResponse:
+    if not path.exists() or not path.is_file():
+        raise HTTPException(status_code=404, detail="file not found")
+    return PlainTextResponse(path.read_text(errors="replace"))
+
+
 @app.get("/")
-async def index(request: Request):
+async def index(request: Request) -> Any:
     return templates.TemplateResponse(
         request, "index.html",
         {"campaigns": _rt().store.list_campaigns()},
@@ -94,7 +126,7 @@ async def index(request: Request):
 
 
 @app.get("/campaigns/{cid}")
-async def campaign(request: Request, cid: str):
+async def campaign(request: Request, cid: str) -> Any:
     if not _known_campaign(cid):
         raise HTTPException(status_code=404, detail="campaign not found")
     return templates.TemplateResponse(
@@ -104,39 +136,99 @@ async def campaign(request: Request, cid: str):
             "summary": _rt().store.summary(cid),
             "meta": _campaign_meta(cid),
             "recent_events": _tail_events(cid),
+            "agent_trace": _rt().store.list_agent_trace(cid),
             "crashes": [_jsonable(c) for c in _rt().store.list_crashes(cid)],
         },
     )
 
 
 @app.get("/api/campaigns")
-async def api_campaigns():
+async def api_campaigns() -> JSONResponse:
     return JSONResponse(_rt().store.list_campaigns())
 
 
 @app.get("/api/campaigns/{cid}")
-async def api_campaign(cid: str):
+async def api_campaign(cid: str) -> JSONResponse:
     if not _known_campaign(cid):
         raise HTTPException(status_code=404, detail="campaign not found")
     return JSONResponse(_rt().store.summary(cid))
 
 
 @app.get("/api/campaigns/{cid}/stats")
-async def api_campaign_stats(cid: str):
+async def api_campaign_stats(cid: str) -> JSONResponse:
     if not _known_campaign(cid):
         raise HTTPException(status_code=404, detail="campaign not found")
     return JSONResponse(_jsonable(_rt().store.latest_stats(cid) or {}))
 
 
 @app.get("/api/campaigns/{cid}/crashes")
-async def api_campaign_crashes(cid: str):
+async def api_campaign_crashes(cid: str) -> JSONResponse:
     if not _known_campaign(cid):
         raise HTTPException(status_code=404, detail="campaign not found")
     return JSONResponse([_jsonable(c) for c in _rt().store.list_crashes(cid)])
 
 
+@app.get("/api/campaigns/{cid}/crashes/{crash_id}")
+async def api_campaign_crash(cid: str, crash_id: str) -> JSONResponse:
+    if not _known_campaign(cid):
+        raise HTTPException(status_code=404, detail="campaign not found")
+    for crash in _rt().store.list_crashes(cid):
+        if crash.crash_id == crash_id:
+            return JSONResponse(_jsonable(crash))
+    raise HTTPException(status_code=404, detail="crash not found")
+
+
+@app.get("/api/campaigns/{cid}/agent-trace")
+async def api_campaign_agent_trace(cid: str) -> JSONResponse:
+    if not _known_campaign(cid):
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return JSONResponse(_rt().store.list_agent_trace(cid))
+
+
+@app.get("/api/campaigns/{cid}/logs/run")
+async def api_campaign_run_log(cid: str) -> PlainTextResponse:
+    if not _known_campaign(cid):
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return _read_text(_rt().store.paths(cid)["run_log"])
+
+
+@app.get("/api/campaigns/{cid}/logs/build")
+async def api_campaign_build_log(cid: str) -> PlainTextResponse:
+    if not _known_campaign(cid):
+        raise HTTPException(status_code=404, detail="campaign not found")
+    meta = _campaign_meta(cid)
+    path = Path(meta.get("artifact", {}).get("build_log_path", ""))
+    return _read_text(path)
+
+
+@app.get("/api/campaigns/{cid}/harness")
+async def api_campaign_harness(cid: str) -> PlainTextResponse:
+    if not _known_campaign(cid):
+        raise HTTPException(status_code=404, detail="campaign not found")
+    meta = _campaign_meta(cid)
+    path = Path(meta.get("artifact", {}).get("harness_source_path", ""))
+    return _read_text(path)
+
+
+@app.get("/api/campaigns/{cid}/coverage/summary")
+async def api_campaign_coverage_summary(cid: str) -> PlainTextResponse:
+    if not _known_campaign(cid):
+        raise HTTPException(status_code=404, detail="campaign not found")
+    return _read_text(_rt().store.paths(cid)["coverage_summary"])
+
+
+@app.get("/api/campaigns/{cid}/coverage/uncovered")
+async def api_campaign_coverage_uncovered(cid: str) -> JSONResponse:
+    if not _known_campaign(cid):
+        raise HTTPException(status_code=404, detail="campaign not found")
+    path = _rt().store.paths(cid)["coverage_uncovered"]
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="file not found")
+    return JSONResponse(json.loads(path.read_text(encoding="utf-8")))
+
+
 @app.post("/api/campaigns")
-async def api_create_campaign(request: Request):
+async def api_create_campaign(request: Request) -> JSONResponse:
     content_type = request.headers.get("content-type", "")
     if content_type.startswith("application/json"):
         payload = await request.json()
@@ -149,28 +241,28 @@ async def api_create_campaign(request: Request):
 
 
 @app.post("/api/campaigns/{cid}/stop")
-async def api_stop_campaign(cid: str):
+async def api_stop_campaign(cid: str) -> JSONResponse:
     stop_campaign(cid)
     return JSONResponse({"ok": True})
 
 
 @app.get("/api/campaigns/{cid}/events")
-async def api_campaign_events(cid: str):
+async def api_campaign_events(cid: str) -> StreamingResponse:
     if not _known_campaign(cid):
         raise HTTPException(status_code=404, detail="campaign not found")
 
-    async def gen():
-        for ev in _tail_events(cid):
-            data = json.dumps(ev)
+    async def gen() -> AsyncIterator[str]:
+        for replay in _tail_events(cid):
+            data = json.dumps(replay)
             yield f"event: replay\ndata: {data}\n\n"
         if cid in getattr(_rt().bus, "_closed", set()):
             return
-        async for ev in _rt().bus.subscribe(cid):
+        async for event in _rt().bus.subscribe(cid):
             data = json.dumps(
-                {"kind": ev.kind.value, "ts": ev.ts.isoformat(), "payload": ev.payload},
+                {"kind": event.kind.value, "ts": event.ts.isoformat(), "payload": event.payload},
                 default=str,
             )
-            yield f"event: {ev.kind.value}\ndata: {data}\n\n"
+            yield f"event: {event.kind.value}\ndata: {data}\n\n"
 
     return StreamingResponse(
         gen(),

@@ -80,6 +80,15 @@ th { color: var(--muted); background: #14181c; }
 tbody tr:nth-child(even) { background: #14181c; }
 .muted { color: var(--muted); }
 .status { color: var(--ok); }
+.trace-table code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.trace-diagnostics {
+  max-width: 420px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 
 .summary, .stats-grid {
   display: grid;
@@ -91,6 +100,11 @@ tbody tr:nth-child(even) { background: #14181c; }
   border-radius: 6px;
   padding: 12px;
   background: #111519;
+}
+ .artifact-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
 }
 span { display: block; color: var(--muted); margin-bottom: 6px; }
 strong { font-size: 18px; font-weight: 700; }

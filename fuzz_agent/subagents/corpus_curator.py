@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 
 from ..state.models import TargetProfile
-from ._llm import call_claude_json
+from ._llm import call_llm_json
 
 _LIKELY_DIRS = ("tests", "test", "examples", "example", "fixtures", "testdata", "samples")
 _EXT_BY_LANG = {
@@ -50,7 +50,7 @@ def run(target: TargetProfile, out_dir: Path, max_seeds: int) -> list[Path]:
                 f"Notes: {target.notes}\n"
                 f"Generate up to {max(5, max_seeds - len(collected))} additional minimal seeds."
             )
-            out = call_claude_json(_SYSTEM, user, max_tokens=2048)
+            out = call_llm_json(_SYSTEM, user, max_tokens=2048)
             for i, s in enumerate(out.get("seeds", [])):
                 if len(collected) >= max_seeds:
                     break

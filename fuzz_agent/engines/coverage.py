@@ -9,13 +9,14 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from ..sandbox import Sandbox
 from ..state.models import HarnessSpec
 
 
 class CoverageBuilder:
     """Build and summarize LLVM source coverage for fuzz harnesses."""
 
-    def __init__(self, sandbox=None) -> None:
+    def __init__(self, sandbox: Sandbox | None = None) -> None:
         self._sandbox = sandbox
 
     def build_coverage_binary(self, spec: HarnessSpec, out_dir: Path) -> Path:
@@ -32,7 +33,10 @@ class CoverageBuilder:
             "-fprofile-instr-generate",
             "-fcoverage-mapping",
             f"-fsanitize=fuzzer,{san}",
+            *spec.compile_flags,
             str(spec.source_path),
+            *(str(p) for p in spec.extra_sources),
+            *spec.link_flags,
             "-o",
             str(binary),
         ]
@@ -68,7 +72,7 @@ class CoverageBuilder:
 
     def export_uncovered_funcs(
         self, binary: Path, profdata: Path, n: int = 20
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Return up to n functions whose exported line regions are uncovered."""
         tool = self._llvm_tool("llvm-cov")
         cmd = [
@@ -104,7 +108,7 @@ class CoverageBuilder:
         if self._sandbox is None or not hasattr(self._sandbox, "wrap"):
             return cmd
         mounts = [(source_dir, source_dir, "ro"), (out_dir, out_dir, "rw")]
-        return self._sandbox.wrap(cmd, mounts=mounts)
+        return list(self._sandbox.wrap(cmd, mounts=mounts))
 
     @staticmethod
     def _llvm_tool(name: str) -> str:

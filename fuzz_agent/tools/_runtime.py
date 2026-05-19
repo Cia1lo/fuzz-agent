@@ -7,12 +7,14 @@ instance with the store, the event bus, and the running engine adapters.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+from collections.abc import Coroutine
 import os
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from ..engines import AtherisEngine, LibFuzzerEngine
+from ..engines import AtherisEngine, CargoFuzzEngine, LibFuzzerEngine
 from ..engines.base import FuzzEngine
 from ..events.stream import EventBus
 from .. import sandbox
@@ -28,10 +30,11 @@ class Runtime:
         selected_sandbox = sandbox.select(None)
         self._engines: dict[EngineKind, FuzzEngine] = {
             EngineKind.LIBFUZZER: LibFuzzerEngine(sandbox=selected_sandbox),
+            EngineKind.CARGO_FUZZ: CargoFuzzEngine(sandbox=selected_sandbox),
             EngineKind.ATHERIS: AtherisEngine(),
         }
-        # campaign_id -> (engine, asyncio.Task)
-        self.running: dict[str, tuple[FuzzEngine, asyncio.Task]] = {}
+        # campaign_id -> (engine, future)
+        self.running: dict[str, tuple[FuzzEngine, concurrent.futures.Future[Any]]] = {}
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
 
@@ -50,7 +53,7 @@ class Runtime:
             self._thread.start()
         return self._loop
 
-    def submit(self, coro):
+    def submit(self, coro: Coroutine[Any, Any, Any]) -> concurrent.futures.Future[Any]:
         return asyncio.run_coroutine_threadsafe(coro, self.loop())
 
 

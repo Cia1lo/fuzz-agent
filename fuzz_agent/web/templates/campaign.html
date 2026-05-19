@@ -34,20 +34,60 @@
          hx-swap="none">
   <h2>Crashes</h2>
   <table>
-    <thead><tr><th>id</th><th>severity</th><th>sanitizer</th><th>stack</th></tr></thead>
+    <thead><tr><th>id</th><th>severity</th><th>vulnerability</th><th>sanitizer</th><th>stack</th></tr></thead>
     <tbody id="crash-table">
       {% for c in crashes %}
       <tr>
         <td>{{ c.crash_id }}</td>
         <td>{{ c.severity or "" }}</td>
+        <td>
+          {% if c.vulnerability_matches %}
+          {{ c.vulnerability_matches[0].cwe or c.vulnerability_matches[0].rule_id }}
+          {{ c.vulnerability_matches[0].title }}
+          {% endif %}
+        </td>
         <td>{{ c.sanitizer_kind or "" }}</td>
         <td>{{ c.stack_hash }}</td>
       </tr>
       {% else %}
-      <tr><td colspan="4" class="muted">No crashes.</td></tr>
+      <tr><td colspan="5" class="muted">No crashes.</td></tr>
       {% endfor %}
     </tbody>
   </table>
+</section>
+
+<section class="panel">
+  <h2>Agent trace</h2>
+  <table class="trace-table">
+    <thead><tr><th>step</th><th>phase</th><th>decision</th><th>score</th><th>diagnostics</th></tr></thead>
+    <tbody>
+      {% for step in agent_trace %}
+      {% set obs = step.observation or {} %}
+      {% set decision = step.decision or {} %}
+      <tr>
+        <td>{{ step.step or loop.index }}</td>
+        <td>{{ step.phase or "" }}</td>
+        <td>{{ decision.action or "" }}<span>{{ decision.reason or "" }}</span></td>
+        <td><code>{{ (step.score or {})|tojson }}</code></td>
+        <td class="trace-diagnostics">{{ obs.diagnostics or "" }}</td>
+      </tr>
+      {% else %}
+      <tr><td colspan="5" class="muted">No agent trace.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+
+<section class="panel">
+  <h2>Artifacts</h2>
+  <div class="artifact-links">
+    <a href="/api/campaigns/{{ cid }}/logs/run">run log</a>
+    <a href="/api/campaigns/{{ cid }}/logs/build">build log</a>
+    <a href="/api/campaigns/{{ cid }}/harness">harness source</a>
+    <a href="/api/campaigns/{{ cid }}/agent-trace">agent trace</a>
+    <a href="/api/campaigns/{{ cid }}/coverage/summary">coverage summary</a>
+    <a href="/api/campaigns/{{ cid }}/coverage/uncovered">uncovered JSON</a>
+  </div>
 </section>
 
 <section class="panel">
@@ -85,9 +125,15 @@ document.body.addEventListener("htmx:afterRequest", (event) => {
   if (path.endsWith("/crashes")) {
     const body = document.getElementById("crash-table");
     body.innerHTML = data.length ? data.map((c) =>
-      `<tr><td>${c.crash_id}</td><td>${c.severity || ""}</td><td>${c.sanitizer_kind || ""}</td><td>${c.stack_hash}</td></tr>`
-    ).join("") : `<tr><td colspan="4" class="muted">No crashes.</td></tr>`;
+      `<tr><td>${c.crash_id}</td><td>${c.severity || ""}</td><td>${vulnText(c)}</td><td>${c.sanitizer_kind || ""}</td><td>${c.stack_hash}</td></tr>`
+    ).join("") : `<tr><td colspan="5" class="muted">No crashes.</td></tr>`;
   }
 });
+
+function vulnText(crash) {
+  const match = (crash.vulnerability_matches || [])[0];
+  if (!match) return "";
+  return `${match.cwe || match.rule_id} ${match.title || ""}`;
+}
 </script>
 {% endblock %}

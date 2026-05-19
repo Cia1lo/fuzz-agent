@@ -11,6 +11,7 @@ from fuzz_agent.state.models import (
     Sanitizer,
     Severity,
     CrashRecord,
+    VulnerabilityMatch,
 )
 from fuzz_agent.state.store import CampaignStore
 
@@ -58,6 +59,33 @@ def test_record_event_appends_jsonl_and_inserts_row(store_root, make_event):
     assert json.loads(row[1]) == {"edges": 12}
 
 
+def test_agent_trace_appends_jsonl(store_root):
+    store = CampaignStore(store_root)
+    cid = store.new_campaign(_config(store_root))
+
+    store.record_agent_trace(cid, {"phase": "harness_attempt", "step": 1})
+    store.record_agent_trace(cid, {"phase": "harness_attempt", "step": 2})
+
+    trace = store.list_agent_trace(cid)
+    assert trace == [
+        {"phase": "harness_attempt", "step": 1},
+        {"phase": "harness_attempt", "step": 2},
+    ]
+    assert store.paths(cid)["agent_trace"].is_file()
+
+
+def test_agent_session_trace_persists_without_campaign(store_root):
+    store = CampaignStore(store_root)
+    session_id = store.new_agent_session({"status": "failed", "target_path": "/tmp/target"})
+
+    store.record_agent_session_trace(session_id, {"phase": "harness_attempt", "step": 1})
+
+    assert store.list_agent_session_trace(session_id) == [
+        {"phase": "harness_attempt", "step": 1}
+    ]
+    assert store.agent_session_paths(session_id)["meta"].is_file()
+
+
 def test_record_stats_upserts_one_latest_row(store_root, make_stats):
     store = CampaignStore(store_root)
     cid = store.new_campaign(_config(store_root))
@@ -101,6 +129,15 @@ def test_save_crash_and_list_crashes_roundtrip(store_root):
         sanitizer_kind="use-after-free",
         discovered_at=datetime.now(timezone.utc),
         severity=Severity.CRITICAL,
+        vulnerability_matches=[
+            VulnerabilityMatch(
+                rule_id="asan-use-after-free",
+                title="Use-after-free",
+                cwe="CWE-416",
+                confidence=0.97,
+                evidence=["use-after-free"],
+            )
+        ],
     )
 
     store.save_crash(crash)
@@ -109,6 +146,7 @@ def test_save_crash_and_list_crashes_roundtrip(store_root):
     assert saved.stack_hash == "stack-abc"
     assert saved.top_frames == ["frame1", "frame2"]
     assert saved.severity is Severity.CRITICAL
+    assert saved.vulnerability_matches[0].cwe == "CWE-416"
 
 
 def test_summary_returns_stats_crashes_and_paths(store_root, make_stats):

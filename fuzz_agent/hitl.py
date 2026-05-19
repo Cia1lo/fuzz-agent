@@ -3,25 +3,25 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Protocol
+from typing import Any, Protocol
 
 
 class HITL(Protocol):
-    async def confirm(self, kind: str, context: dict) -> bool: ...
+    async def confirm(self, kind: str, context: dict[str, Any]) -> bool: ...
 
 
 class AlwaysAllow:
-    async def confirm(self, kind: str, context: dict) -> bool:
+    async def confirm(self, kind: str, context: dict[str, Any]) -> bool:
         return True
 
 
 class AlwaysDeny:
-    async def confirm(self, kind: str, context: dict) -> bool:
+    async def confirm(self, kind: str, context: dict[str, Any]) -> bool:
         return False
 
 
 class CLIPrompt:
-    async def confirm(self, kind: str, context: dict) -> bool:
+    async def confirm(self, kind: str, context: dict[str, Any]) -> bool:
         loop = asyncio.get_running_loop()
         print(f"HITL confirmation required: {kind}")
         for key, value in context.items():

@@ -12,7 +12,15 @@ import click
 from . import tools
 from .events.stream import EventBus
 from .orchestrator import CampaignGoal, Orchestrator
+from .state.models import EngineKind
 from .state.store import CampaignStore
+
+_ENGINE_CHOICES = [
+    EngineKind.LIBFUZZER.value,
+    EngineKind.CARGO_FUZZ.value,
+    EngineKind.ATHERIS.value,
+    "cargo_fuzz",
+]
 
 
 def _parse_duration(s: str) -> int:
@@ -21,6 +29,15 @@ def _parse_duration(s: str) -> int:
         raise click.BadParameter(f"bad duration: {s!r}")
     n, u = int(m.group(1)), m.group(2) or "s"
     return n * {"s": 1, "m": 60, "h": 3600, "d": 86400}[u]
+
+
+def _parse_engine(s: str) -> EngineKind:
+    try:
+        return EngineKind(s)
+    except ValueError as exc:
+        if s == "cargo_fuzz":
+            return EngineKind.CARGO_FUZZ
+        raise click.BadParameter(f"unknown engine: {s!r}") from exc
 
 
 @click.group()
@@ -62,7 +79,20 @@ def analyze(path: Path) -> None:
 @click.option("--max-crashes", default=50, type=int)
 @click.option("--plateau", default=300, type=int, help="plateau idle seconds")
 @click.option("--no-triage", is_flag=True, default=False)
-def run(path: Path, time_str: str, max_crashes: int, plateau: int, no_triage: bool) -> None:
+@click.option(
+    "--engine",
+    "engine_str",
+    default=EngineKind.LIBFUZZER.value,
+    type=click.Choice(_ENGINE_CHOICES),
+)
+def run(
+    path: Path,
+    time_str: str,
+    max_crashes: int,
+    plateau: int,
+    no_triage: bool,
+    engine_str: str,
+) -> None:
     """Plan + drive a fuzz campaign on PATH."""
     root = Path.cwd()
     store = CampaignStore(root)
@@ -79,6 +109,7 @@ def run(path: Path, time_str: str, max_crashes: int, plateau: int, no_triage: bo
         max_unique_crashes=max_crashes,
         coverage_plateau_sec=plateau,
         auto_triage=not no_triage,
+        engine=_parse_engine(engine_str),
     )
     orch = Orchestrator(store, bus)
     summary = asyncio.run(orch.run(goal))
@@ -93,9 +124,25 @@ def triage(campaign_id: str, top: int) -> None:
     crashes = tools.triage_crashes(campaign_id, top_n=top)
     click.echo(json.dumps([
         {"crash_id": c.crash_id, "stack_hash": c.stack_hash,
-         "sanitizer_kind": c.sanitizer_kind, "top_frames": c.top_frames}
+         "sanitizer_kind": c.sanitizer_kind, "top_frames": c.top_frames,
+         "status": c.status.value, "reproducible": c.reproducible,
+         "vulnerability_matches": [
+             {"rule_id": m.rule_id, "title": m.title, "cwe": m.cwe,
+              "confidence": m.confidence, "source": m.source}
+             for m in c.vulnerability_matches
+         ]}
         for c in crashes
     ], indent=2))
+
+
+@main.command()
+@click.argument("campaign_id")
+@click.option("--time", "time_str", default=None, help="new time budget (e.g. 30m, 2h)")
+def resume(campaign_id: str, time_str: str | None) -> None:
+    """Resume an existing campaign as a new campaign seeded from its corpus."""
+    budget = _parse_duration(time_str) if time_str else None
+    cid = tools.resume_campaign(campaign_id, budget)
+    click.echo(json.dumps({"campaign_id": cid, "resumed_from": campaign_id}, indent=2))
 
 
 @main.command()

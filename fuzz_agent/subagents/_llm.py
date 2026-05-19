@@ -1,58 +1,77 @@
-"""Tiny Claude wrapper used by every subagent.
+"""Tiny OpenAI-compatible LLM wrapper used by every subagent.
 
 Why this exists:
-  - Subagents are context-isolated workers. They each call Claude with a
+  - Subagents are context-isolated workers. They each call an LLM with a
     narrow system prompt and return small structured output.
-  - Reusing the same system prompt across calls is the common case, so we
-    enable prompt caching by default (cache_control=ephemeral).
+  - The OpenAI client supports both OpenAI and OpenAI-compatible providers
+    through OPENAI_API_KEY and optional OPENAI_BASE_URL.
 """
 from __future__ import annotations
 
 import json
 import os
-from typing import Any
+from typing import Any, cast
 
-DEFAULT_MODEL = os.environ.get("FUZZ_AGENT_MODEL", "claude-sonnet-4-6")
+DEFAULT_MODEL = os.environ.get("FUZZ_AGENT_MODEL", "gpt-4o-mini")
 
 
-def _client():  # lazy import so the package is importable without anthropic installed
+def _client() -> Any:  # lazy import so the package is importable without openai installed
     try:
-        from anthropic import Anthropic
+        from openai import OpenAI  # type: ignore[import-not-found]
     except ImportError as e:
         raise RuntimeError(
-            "anthropic package not installed. `pip install anthropic` and set ANTHROPIC_API_KEY."
+            "openai package not installed. `pip install openai` and set OPENAI_API_KEY."
         ) from e
-    return Anthropic()
+
+    api_key = os.environ.get("OPENAI_API_KEY")
+    base_url = os.environ.get("OPENAI_BASE_URL")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY is not set.")
+    kwargs: dict[str, str] = {"api_key": api_key}
+    if base_url:
+        kwargs["base_url"] = base_url
+    return OpenAI(**kwargs)
 
 
-def call_claude(system: str, user: str, *,
-                max_tokens: int = 2048,
-                model: str = DEFAULT_MODEL) -> str:
-    """Single-turn Claude call. System prompt is cached (ephemeral)."""
+def call_llm(system: str, user: str, *,
+             max_tokens: int = 2048,
+             model: str = DEFAULT_MODEL) -> str:
+    """Single-turn OpenAI-compatible chat completion call."""
     client = _client()
-    resp = client.messages.create(
+    resp = client.chat.completions.create(
         model=model,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        temperature=0,
         max_tokens=max_tokens,
-        system=[{"type": "text", "text": system,
-                 "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": user}],
     )
-    return "".join(b.text for b in resp.content if getattr(b, "type", None) == "text")
+    choice = resp.choices[0] if resp.choices else None
+    if choice is None or choice.message.content is None:
+        return ""
+    return cast(str, choice.message.content)
 
 
-def call_claude_json(system: str, user: str, *, max_tokens: int = 2048,
-                     model: str = DEFAULT_MODEL) -> Any:
-    """Same as call_claude but parses JSON, with one retry on malformed output."""
-    raw = call_claude(system, user, max_tokens=max_tokens, model=model)
+def call_llm_json(system: str, user: str, *, max_tokens: int = 2048,
+                  model: str = DEFAULT_MODEL) -> Any:
+    """Same as call_llm but parses JSON, with one retry on malformed output."""
+    raw = call_llm(system, user, max_tokens=max_tokens, model=model)
     try:
         return json.loads(_strip_fences(raw))
     except json.JSONDecodeError:
-        retry = call_claude(
+        retry = call_llm(
             system,
             user + "\n\nReturn JSON ONLY. No prose, no markdown fences.",
-            max_tokens=max_tokens, model=model,
+            max_tokens=max_tokens,
+            model=model,
         )
         return json.loads(_strip_fences(retry))
+
+
+# Backward-compatible aliases for existing integrations.
+call_claude = call_llm
+call_claude_json = call_llm_json
 
 
 def _strip_fences(s: str) -> str:
