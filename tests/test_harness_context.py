@@ -47,6 +47,38 @@ def test_pack_context_finds_cpp_signature_flags_and_samples(tmp_path):
     assert str(samples / "seed") in context["sample_inputs"]
 
 
+def test_pack_context_prefers_cpp_definition_over_header_declaration(tmp_path):
+    header = tmp_path / "parser.h"
+    header.write_text(
+        "#pragma once\n"
+        "#include <cstddef>\n"
+        "#include <cstdint>\n"
+        "int ParseThing(const uint8_t* data, size_t size);\n",
+        encoding="utf-8",
+    )
+    src = tmp_path / "parser.cc"
+    src.write_text(
+        '#include "parser.h"\n\n'
+        "int ParseThing(const uint8_t* data, size_t size) {\n"
+        "  return size > 0 ? data[0] : 0;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    target = TargetProfile(
+        root=tmp_path,
+        language=Language.CPP,
+        entry_points=["ParseThing"],
+        build_system="cmake",
+    )
+
+    context = pack_context(target, "ParseThing", EngineKind.LIBFUZZER)
+
+    assert context["source_file"] == str(src)
+    assert str(src) in context["extra_sources"]
+    assert str(header) not in context["extra_sources"]
+    assert f"-I{tmp_path}" in context["compile_flags"]
+
+
 def test_pack_context_for_cargo_fuzz_includes_rust_crate_context(tmp_path):
     (tmp_path / "Cargo.toml").write_text(
         '[package]\nname = "demo-crate"\nedition = "2021"\n\n[dependencies]\nserde = "1"\n',

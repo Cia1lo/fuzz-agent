@@ -40,6 +40,13 @@ _CRASH_HEADER_RE = re.compile(r"==\d+==ERROR: (?P<sanitizer>\w+Sanitizer): (?P<k
 _OOM_RE = re.compile(r"out-of-memory|libFuzzer: out-of-memory", re.IGNORECASE)
 _TIMEOUT_RE = re.compile(r"libFuzzer: timeout", re.IGNORECASE)
 _HEARTBEAT_INTERVAL_SEC = 10
+_CLANG_SANITIZERS = {
+    "asan": "address",
+    "ubsan": "undefined",
+    "msan": "memory",
+    "tsan": "thread",
+}
+_CPP_EXTS = {".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx"}
 
 
 class LibFuzzerEngine(FuzzEngine):
@@ -66,8 +73,8 @@ class LibFuzzerEngine(FuzzEngine):
         out_dir.mkdir(parents=True, exist_ok=True)
         binary = out_dir / f"fuzz_{spec.entry}_attempt_{spec.attempt}"
         log = out_dir / f"build_{spec.entry}_attempt_{spec.attempt}.log"
-        san = ",".join(s.value for s in spec.sanitizers) or "address"
-        cc = os.environ.get("CC", "clang")
+        san = _clang_sanitizer_arg(spec)
+        cc = _compiler_for_spec(spec)
         cmd = [
             cc, "-g", "-O1", f"-fsanitize=fuzzer,{san}",
             *spec.compile_flags,
@@ -376,3 +383,35 @@ class LibFuzzerEngine(FuzzEngine):
             key = (host, container)
             merged[key] = "rw" if mode == "rw" or merged.get(key) == "rw" else "ro"
         return [(host, container, mode) for (host, container), mode in merged.items()]
+
+
+def _clang_sanitizer_arg(spec: HarnessSpec) -> str:
+    return ",".join(_CLANG_SANITIZERS.get(s.value, s.value) for s in spec.sanitizers) or "address"
+
+
+def _compiler_for_spec(spec: HarnessSpec) -> str:
+    if _needs_cxx_driver(spec):
+        cxx = os.environ.get("CXX")
+        if cxx:
+            return cxx
+        cc = os.environ.get("CC")
+        if cc:
+            return _cxx_from_cc(cc)
+        return "clang++"
+    return os.environ.get("CC", "clang")
+
+
+def _needs_cxx_driver(spec: HarnessSpec) -> bool:
+    if spec.target.language is Language.CPP:
+        return True
+    paths = [spec.source_path, *spec.extra_sources]
+    return any(path.suffix.lower() in _CPP_EXTS for path in paths)
+
+
+def _cxx_from_cc(cc: str) -> str:
+    path = Path(cc)
+    if path.name == "clang":
+        return str(path.with_name("clang++")) if path.parent != Path(".") else "clang++"
+    if path.name == "gcc":
+        return str(path.with_name("g++")) if path.parent != Path(".") else "g++"
+    return cc

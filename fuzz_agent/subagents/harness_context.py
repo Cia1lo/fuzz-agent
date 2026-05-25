@@ -11,6 +11,7 @@ from typing import Any, Iterator, cast
 from ..state.models import EngineKind, Language, TargetProfile
 
 _C_EXTS = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx"}
+_C_HEADER_EXTS = {".h", ".hh", ".hpp", ".hxx"}
 _RUST_EXTS = {".rs"}
 _SKIP_DIRS = {".git", ".fuzz", "state", "build", "__pycache__"}
 _SAMPLE_DIRS = ("tests", "test", "examples", "example", "fixtures", "testdata", "samples")
@@ -35,6 +36,9 @@ def pack_context(target: TargetProfile, entry: str, engine: EngineKind) -> dict[
     extra_sources: list[str] = []
     if source is not None:
         compile_flags, link_flags = _compile_commands_flags(target.root, source)
+        for flag in _default_include_flags(target.root, source):
+            if flag not in compile_flags:
+                compile_flags.append(flag)
         if source.suffix.lower() not in {".h", ".hh", ".hpp", ".hxx"}:
             extra_sources.append(str(source))
     return {
@@ -84,6 +88,7 @@ def _iter_source_files(root: Path, exts: set[str]) -> Iterator[Path]:
 
 def _find_entry_source(root: Path, entry: str, exts: set[str]) -> tuple[Path | None, int | None]:
     call_re = re.compile(rf"\b{re.escape(entry)}\s*\(")
+    matches: list[tuple[Path, int, bool]] = []
     for path in _iter_source_files(root, exts):
         try:
             lines = path.read_text(errors="replace").splitlines()
@@ -91,8 +96,34 @@ def _find_entry_source(root: Path, entry: str, exts: set[str]) -> tuple[Path | N
             continue
         for idx, line in enumerate(lines, start=1):
             if call_re.search(line) and not line.strip().startswith("//"):
-                return path, idx
+                is_definition = _looks_like_definition(lines, idx)
+                if path.suffix.lower() not in _C_HEADER_EXTS and is_definition:
+                    return path, idx
+                matches.append((path, idx, is_definition))
+    for path, idx, _is_definition in matches:
+        if path.suffix.lower() not in _C_HEADER_EXTS:
+            return path, idx
+    for path, idx, _is_definition in matches:
+        return path, idx
     return None, None
+
+
+def _looks_like_definition(lines: list[str], line_no: int) -> bool:
+    chunk = " ".join(line.strip() for line in lines[line_no - 1:min(len(lines), line_no + 8)])
+    brace = chunk.find("{")
+    if brace < 0:
+        return False
+    semicolon = chunk.find(";")
+    return semicolon < 0 or brace < semicolon
+
+
+def _default_include_flags(root: Path, source: Path) -> list[str]:
+    flags: list[str] = []
+    for include_dir in (source.parent, root):
+        flag = f"-I{include_dir}"
+        if flag not in flags:
+            flags.append(flag)
+    return flags
 
 
 def _cargo_context(root: Path) -> dict[str, Any]:

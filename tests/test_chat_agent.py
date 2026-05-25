@@ -1,0 +1,223 @@
+import asyncio
+
+from click.testing import CliRunner
+
+from fuzz_agent.chat import ChatSession, ConversationAgent
+from fuzz_agent.cli import main
+from fuzz_agent.events.stream import EventBus
+from fuzz_agent.state.models import BuildArtifact, CampaignConfig, EngineKind
+from fuzz_agent.state.store import CampaignStore
+from fuzz_agent.tools import _runtime
+from fuzz_agent.tools._runtime import Runtime
+
+
+def test_chat_analyze_target_sets_session_target(tmp_path):
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
+    (tmp_path / "parser.py").write_text(
+        "def parse_json(data):\n    return data\n",
+        encoding="utf-8",
+    )
+    session = ChatSession()
+    agent = ConversationAgent(CampaignStore(tmp_path), EventBus())
+
+    reply = asyncio.run(agent.respond(session, f"analyze {tmp_path}"))
+
+    assert "语言: python" in reply
+    assert "parse_json" in reply
+    assert session.target_path == str(tmp_path.resolve())
+
+
+def test_chat_status_uses_explicit_campaign_id(tmp_path, monkeypatch, make_stats):
+    rt = Runtime(root=tmp_path)
+    monkeypatch.setattr(_runtime, "_singleton", rt)
+    rt.store.record_stats(make_stats("abc123", unique_crashes=2))
+    session = ChatSession()
+    agent = ConversationAgent(rt.store, rt.bus)
+
+    reply = asyncio.run(agent.respond(session, "status abc123"))
+
+    assert "campaign `abc123`" in reply
+    assert "unique crashes: 2" in reply
+    assert session.active_campaign_id == "abc123"
+
+
+def test_chat_status_without_campaign_does_not_treat_command_as_id(tmp_path):
+    rt = Runtime(root=tmp_path)
+    session = ChatSession()
+    agent = ConversationAgent(rt.store, rt.bus)
+
+    reply = asyncio.run(agent.respond(session, "status"))
+
+    assert "没有可用 campaign" in reply
+
+
+def test_chat_slash_help_uses_command_parser(tmp_path):
+    rt = Runtime(root=tmp_path)
+    session = ChatSession()
+    agent = ConversationAgent(rt.store, rt.bus)
+
+    reply = asyncio.run(agent.respond(session, "/help"))
+
+    assert "可用对话命令" in reply
+
+
+def test_chat_greeting_works_without_llm(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    rt = Runtime(root=tmp_path)
+    session = ChatSession()
+    agent = ConversationAgent(rt.store, rt.bus)
+
+    reply = asyncio.run(agent.respond(session, "你好"))
+
+    assert "你好" in reply
+    assert "fuzz-agent" in reply
+
+
+def test_chat_run_parses_chinese_freeform_without_spaces(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    target = tmp_path / "demo_targets" / "real_target_crash"
+    target.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    captured_goals = []
+
+    async def fake_run(self, goal):
+        captured_goals.append(goal)
+        return {
+            "campaign_id": "cid123",
+            "stats": {
+                "status": "finished",
+                "elapsed_sec": goal.time_budget_sec,
+                "unique_crashes": 0,
+            },
+            "paths": {"agent_trace": "trace.jsonl"},
+        }
+
+    monkeypatch.setattr("fuzz_agent.chat.agent.Orchestrator.run", fake_run)
+    session = ChatSession()
+    agent = ConversationAgent(CampaignStore(tmp_path), EventBus())
+
+    reply = asyncio.run(agent.respond(session, "对demo_targets/real_target_crash进行fuzz测试一分钟"))
+
+    assert "campaign `cid123`" in reply
+    assert len(captured_goals) == 1
+    assert captured_goals[0].target_path == target.resolve()
+    assert captured_goals[0].time_budget_sec == 60
+    assert captured_goals[0].engine == EngineKind.LIBFUZZER
+    assert session.target_path == str(target.resolve())
+    assert session.active_campaign_id == "cid123"
+
+
+def test_chat_run_reuses_target_for_chinese_duration(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    captured_goals = []
+
+    async def fake_run(self, goal):
+        captured_goals.append(goal)
+        return {
+            "campaign_id": "cid456",
+            "stats": {
+                "status": "finished",
+                "elapsed_sec": goal.time_budget_sec,
+                "unique_crashes": 0,
+            },
+            "paths": {"agent_trace": "trace.jsonl"},
+        }
+
+    monkeypatch.setattr("fuzz_agent.chat.agent.Orchestrator.run", fake_run)
+    session = ChatSession(target_path=str(tmp_path))
+    agent = ConversationAgent(CampaignStore(tmp_path), EventBus())
+
+    reply = asyncio.run(agent.respond(session, "跑半分钟"))
+
+    assert "campaign `cid456`" in reply
+    assert len(captured_goals) == 1
+    assert captured_goals[0].target_path == tmp_path.resolve()
+    assert captured_goals[0].time_budget_sec == 30
+
+
+def test_chat_llm_intent_can_parse_freeform_analyze(tmp_path, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "test")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
+    (tmp_path / "parser.py").write_text(
+        "def parse_json(data):\n    return data\n",
+        encoding="utf-8",
+    )
+
+    def fake_call_llm_json(*_args, **_kwargs):
+        return {
+            "intent": "analyze",
+            "path": str(tmp_path),
+            "campaign_id": None,
+            "duration_sec": None,
+            "engine": None,
+            "top_n": None,
+            "reply": None,
+        }
+
+    monkeypatch.setattr("fuzz_agent.chat.agent.call_llm_json", fake_call_llm_json)
+    session = ChatSession()
+    agent = ConversationAgent(CampaignStore(tmp_path), EventBus())
+
+    reply = asyncio.run(agent.respond(session, "帮我看一下这个项目"))
+
+    assert "语言: python" in reply
+    assert "parse_json" in reply
+
+
+def test_chat_trace_summarizes_agent_trace(tmp_path, monkeypatch):
+    rt = Runtime(root=tmp_path)
+    monkeypatch.setattr(_runtime, "_singleton", rt)
+    cid = _new_test_campaign(rt)
+    rt.store.record_agent_trace(cid, {
+        "phase": "harness_attempt",
+        "observation": {"diagnostics": "missing include <stdint.h>"},
+        "decision": {"action": "regenerate_harness", "reason": "build failed"},
+    })
+    session = ChatSession(active_campaign_id=cid)
+    agent = ConversationAgent(rt.store, rt.bus)
+
+    reply = asyncio.run(agent.respond(session, "trace"))
+
+    assert "harness_attempt" in reply
+    assert "regenerate_harness" in reply
+    assert "missing include" in reply
+
+
+def test_chat_stop_calls_tool_for_active_campaign(tmp_path, monkeypatch):
+    rt = Runtime(root=tmp_path)
+    called: list[str] = []
+    monkeypatch.setattr("fuzz_agent.chat.agent.tools.stop_campaign", called.append)
+    session = ChatSession(active_campaign_id="abc123")
+    agent = ConversationAgent(rt.store, rt.bus)
+
+    reply = asyncio.run(agent.respond(session, "stop"))
+
+    assert called == ["abc123"]
+    assert "已请求停止" in reply
+
+
+def test_cli_chat_help_smoke():
+    runner = CliRunner()
+    with runner.isolated_filesystem():
+        result = runner.invoke(main, ["chat"], input="help\nquit\n")
+
+    assert result.exit_code == 0
+    assert "Fuzz Agent chat" in result.output
+    assert "可用对话命令" in result.output
+
+
+def _new_test_campaign(rt: Runtime) -> str:
+    artifact = BuildArtifact(
+        binary_path=rt.root / "fuzz",
+        engine=EngineKind.LIBFUZZER,
+        sanitizers=[],
+        build_log_path=rt.root / "build.log",
+    )
+    cfg = CampaignConfig(
+        artifact=artifact,
+        corpus_dir=rt.root / "corpus",
+        crash_dir=rt.root / "crashes",
+        dictionary_path=None,
+        time_budget_sec=30,
+    )
+    return rt.store.new_campaign(cfg)

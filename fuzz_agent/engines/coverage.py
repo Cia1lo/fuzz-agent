@@ -10,7 +10,15 @@ from pathlib import Path
 from typing import Any
 
 from ..sandbox import Sandbox
-from ..state.models import HarnessSpec
+from ..state.models import HarnessSpec, Language
+
+_CLANG_SANITIZERS = {
+    "asan": "address",
+    "ubsan": "undefined",
+    "msan": "memory",
+    "tsan": "thread",
+}
+_CPP_EXTS = {".cc", ".cpp", ".cxx", ".c++", ".hh", ".hpp", ".hxx"}
 
 
 class CoverageBuilder:
@@ -24,8 +32,8 @@ class CoverageBuilder:
         out_dir.mkdir(parents=True, exist_ok=True)
         binary = out_dir / f"fuzz_{spec.entry}_coverage"
         log = out_dir / f"build_{spec.entry}_coverage.log"
-        san = ",".join(s.value for s in spec.sanitizers) or "address"
-        cc = os.environ.get("CC", "clang")
+        san = _clang_sanitizer_arg(spec)
+        cc = _compiler_for_spec(spec)
         cmd = [
             cc,
             "-g",
@@ -126,3 +134,35 @@ class CoverageBuilder:
         starts = [int(region[0]) for region in regions if len(region) >= 3]
         ends = [int(region[2]) for region in regions if len(region) >= 3]
         return (min(starts), max(ends)) if starts and ends else (0, 0)
+
+
+def _clang_sanitizer_arg(spec: HarnessSpec) -> str:
+    return ",".join(_CLANG_SANITIZERS.get(s.value, s.value) for s in spec.sanitizers) or "address"
+
+
+def _compiler_for_spec(spec: HarnessSpec) -> str:
+    if _needs_cxx_driver(spec):
+        cxx = os.environ.get("CXX")
+        if cxx:
+            return cxx
+        cc = os.environ.get("CC")
+        if cc:
+            return _cxx_from_cc(cc)
+        return "clang++"
+    return os.environ.get("CC", "clang")
+
+
+def _needs_cxx_driver(spec: HarnessSpec) -> bool:
+    if spec.target.language is Language.CPP:
+        return True
+    paths = [spec.source_path, *spec.extra_sources]
+    return any(path.suffix.lower() in _CPP_EXTS for path in paths)
+
+
+def _cxx_from_cc(cc: str) -> str:
+    path = Path(cc)
+    if path.name == "clang":
+        return str(path.with_name("clang++")) if path.parent != Path(".") else "clang++"
+    if path.name == "gcc":
+        return str(path.with_name("g++")) if path.parent != Path(".") else "g++"
+    return cc

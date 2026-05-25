@@ -1,13 +1,18 @@
 import asyncio
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
-from fuzz_agent.engines.libfuzzer import LibFuzzerEngine
+from fuzz_agent.engines.libfuzzer import LibFuzzerEngine, _clang_sanitizer_arg, _compiler_for_spec
 from fuzz_agent.state.models import (
     BuildArtifact,
     CampaignConfig,
     EngineKind,
     EventKind,
+    HarnessSpec,
+    Language,
+    Sanitizer,
+    TargetProfile,
 )
 
 
@@ -15,6 +20,59 @@ def _engine_with_campaign(cid: str = "cid") -> LibFuzzerEngine:
     engine = LibFuzzerEngine()
     engine._start_ts[cid] = datetime.now(timezone.utc)
     return engine
+
+
+def test_clang_sanitizer_arg_uses_clang_names(tmp_path):
+    spec = HarnessSpec(
+        target=TargetProfile(
+            root=tmp_path,
+            language=Language.CPP,
+            entry_points=["ParseThing"],
+            build_system="cmake",
+        ),
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        source_path=Path("harness.cc"),
+        sanitizers=[Sanitizer.ASAN, Sanitizer.UBSAN],
+    )
+
+    assert _clang_sanitizer_arg(spec) == "address,undefined"
+
+
+def test_libfuzzer_uses_cxx_driver_for_cpp_targets(tmp_path, monkeypatch):
+    monkeypatch.delenv("CC", raising=False)
+    monkeypatch.delenv("CXX", raising=False)
+    spec = HarnessSpec(
+        target=TargetProfile(
+            root=tmp_path,
+            language=Language.CPP,
+            entry_points=["ParseThing"],
+            build_system="cmake",
+        ),
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        source_path=Path("harness.cc"),
+    )
+
+    assert _compiler_for_spec(spec) == "clang++"
+
+
+def test_libfuzzer_derives_cxx_from_cc_for_cpp_targets(tmp_path, monkeypatch):
+    monkeypatch.setenv("CC", "/opt/llvm/bin/clang")
+    monkeypatch.delenv("CXX", raising=False)
+    spec = HarnessSpec(
+        target=TargetProfile(
+            root=tmp_path,
+            language=Language.CPP,
+            entry_points=["ParseThing"],
+            build_system="cmake",
+        ),
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        source_path=Path("harness.cc"),
+    )
+
+    assert _compiler_for_spec(spec) == "/opt/llvm/bin/clang++"
 
 
 def test_parse_new_status_line_returns_coverage_event_and_updates_stats():
