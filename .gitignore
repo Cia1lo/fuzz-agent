@@ -10,5 +10,14 @@ venv/
 dist/
 build/
 
-state/
-.fuzz/
+# Local runtime state and generated fuzz artifacts.
+/state/
+**/.fuzz/
+*.profraw
+*.profdata
+crash-*
+leak-*
+timeout-*
+
+# Local shell/environment overrides.
+.envrc

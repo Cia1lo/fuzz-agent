@@ -2,12 +2,16 @@
 {% block main %}
 <header class="topbar">
   <h1>Fuzz Agent</h1>
-  <div id="flash"></div>
+  <div class="nav-links">
+    <a href="/chat">Chat</a>
+    <div id="flash"></div>
+  </div>
 </header>
 
 <section class="panel">
   <h2>New campaign</h2>
-  <form hx-post="/api/campaigns" hx-target="#flash" hx-swap="innerHTML">
+  <form id="campaign-form" action="/api/campaigns" method="post"
+        hx-post="/api/campaigns" hx-target="#flash" hx-swap="innerHTML">
     <label>Path <input name="path" required></label>
     <label>Seconds <input name="time_sec" type="number" min="1" value="60" required></label>
     <label>Engine
@@ -51,4 +55,35 @@
     </tbody>
   </table>
 </div>
+<script>
+const campaignForm = document.getElementById("campaign-form");
+const flash = document.getElementById("flash");
+
+if (!window.htmx && campaignForm) {
+  campaignForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = campaignForm.querySelector("button[type='submit']");
+    if (button) button.disabled = true;
+    if (flash) flash.textContent = "Starting campaign...";
+    try {
+      const response = await fetch(campaignForm.action, {
+        method: "POST",
+        body: new FormData(campaignForm),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.detail || response.statusText);
+      }
+      if (flash) {
+        flash.innerHTML = `Started <a href="/campaigns/${data.campaign_id}">${data.campaign_id}</a>`;
+      }
+      setTimeout(() => window.location.reload(), 1500);
+    } catch (error) {
+      if (flash) flash.textContent = `Failed: ${error.message || error}`;
+    } finally {
+      if (button) button.disabled = false;
+    }
+  });
+}
+</script>
 {% endblock %}

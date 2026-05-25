@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from ..chat import ChatSession, ConversationAgent
 from ..tools import _runtime, stop_campaign
 from ..tools._runtime import Runtime
 from ._launcher import submit_campaign
@@ -24,12 +25,24 @@ app = FastAPI(title="Fuzz Agent")
 _WEB_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=_WEB_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=_WEB_DIR / "templates")
+templates.env.globals["asset_version"] = (
+    lambda: int((_WEB_DIR / "static" / "style.css").stat().st_mtime)
+)
 
 
 class CampaignRequest(BaseModel):
     path: str
     time_sec: int = Field(gt=0)
     engine: str
+
+
+class ChatRequest(BaseModel):
+    message: str
+    session_id: str = "default"
+    campaign_id: str | None = None
+
+
+_chat_sessions: dict[str, ChatSession] = {}
 
 
 def _rt() -> Runtime:
@@ -117,12 +130,83 @@ def _read_text(path: Path) -> PlainTextResponse:
     return PlainTextResponse(path.read_text(errors="replace"))
 
 
+def _chat_session_title(session: ChatSession) -> str:
+    for turn in session.history:
+        if turn.role == "user" and turn.content.strip():
+            return _short_label(turn.content)
+    if session.target_path:
+        return _short_label(Path(session.target_path).name or session.target_path)
+    if session.active_campaign_id:
+        return f"campaign {session.active_campaign_id}"
+    return "New session"
+
+
+def _short_label(value: str, limit: int = 42) -> str:
+    text = " ".join(value.split())
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1] + "…"
+
+
+def _load_chat_session(session_id: str) -> ChatSession | None:
+    cached = _chat_sessions.get(session_id)
+    if cached is not None:
+        return cached
+    data = _rt().store.get_chat_session(session_id)
+    if data is None:
+        return None
+    session = ChatSession.from_dict(data)
+    _chat_sessions[session.session_id] = session
+    return session
+
+
+def _save_chat_session(session: ChatSession) -> None:
+    _chat_sessions[session.session_id] = session
+    _rt().store.save_chat_session(session.to_dict())
+
+
+def _list_chat_sessions() -> list[ChatSession]:
+    sessions: dict[str, ChatSession] = {}
+    for data in _rt().store.list_chat_sessions():
+        session = ChatSession.from_dict(data)
+        cached = _chat_sessions.get(session.session_id)
+        sessions[session.session_id] = cached or session
+        _chat_sessions.setdefault(session.session_id, session)
+    for session in _chat_sessions.values():
+        if session.history:
+            sessions[session.session_id] = session
+    return sorted(sessions.values(), key=lambda session: session.updated_at, reverse=True)
+
+
+def _chat_session_json(session: ChatSession, *, include_history: bool = False) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "session_id": session.session_id,
+        "title": _chat_session_title(session),
+        "active_campaign_id": session.active_campaign_id,
+        "target_path": session.target_path,
+        "turn_count": len(session.history),
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+    }
+    if include_history:
+        data["history"] = [
+            {"role": turn.role, "content": turn.content, "created_at": turn.created_at}
+            for turn in session.history
+        ]
+    return data
+
+
 @app.get("/")
 async def index(request: Request) -> Any:
     return templates.TemplateResponse(
         request, "index.html",
         {"campaigns": _rt().store.list_campaigns()},
     )
+
+
+@app.get("/chat")
+async def chat_page(request: Request) -> Any:
+    return templates.TemplateResponse(request, "chat.html", {})
 
 
 @app.get("/campaigns/{cid}")
@@ -145,6 +229,39 @@ async def campaign(request: Request, cid: str) -> Any:
 @app.get("/api/campaigns")
 async def api_campaigns() -> JSONResponse:
     return JSONResponse(_rt().store.list_campaigns())
+
+
+@app.get("/api/chat/sessions")
+async def api_chat_sessions() -> JSONResponse:
+    return JSONResponse([
+        _chat_session_json(session)
+        for session in _list_chat_sessions()
+    ])
+
+
+@app.get("/api/chat/sessions/{session_id}")
+async def api_chat_session(session_id: str) -> JSONResponse:
+    session = _load_chat_session(session_id)
+    if session is None:
+        raise HTTPException(status_code=404, detail="chat session not found")
+    return JSONResponse(_chat_session_json(session, include_history=True))
+
+
+@app.post("/api/chat")
+async def api_chat(body: ChatRequest) -> JSONResponse:
+    session_id = body.session_id.strip() or "default"
+    session = _load_chat_session(session_id) or ChatSession(session_id=session_id)
+    if body.campaign_id:
+        if not _known_campaign(body.campaign_id):
+            raise HTTPException(status_code=404, detail="campaign not found")
+        session.active_campaign_id = body.campaign_id
+    agent = ConversationAgent(_rt().store, _rt().bus)
+    reply = await agent.respond(session, body.message)
+    _save_chat_session(session)
+    return JSONResponse({
+        "reply": reply,
+        **_chat_session_json(session, include_history=True),
+    })
 
 
 @app.get("/api/campaigns/{cid}")

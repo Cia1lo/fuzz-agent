@@ -158,5 +158,34 @@ def status(campaign_id: str) -> None:
     }, indent=2))
 
 
+@main.command("chat")
+@click.option("--session-id", default="default", help="conversation session label")
+def chat_cmd(session_id: str) -> None:
+    """Start a minimal conversational CLI facade."""
+    root = Path.cwd()
+    store = CampaignStore(root)
+    bus = EventBus()
+    from .tools import _runtime
+    rt = _runtime.runtime()
+    rt.bus = bus
+    rt.store = store
+
+    from .chat import ChatSession, ConversationAgent
+
+    session = ChatSession(session_id=session_id)
+    agent = ConversationAgent(store, bus)
+    click.echo("Fuzz Agent chat. Type `help` for commands, `quit` to exit.")
+    while True:
+        try:
+            message = click.prompt(">", prompt_suffix=" ", default="", show_default=False)
+        except (EOFError, KeyboardInterrupt):
+            click.echo()
+            return
+        if message.strip().lower() in {"q", "quit", "exit"}:
+            return
+        reply = asyncio.run(agent.respond(session, message))
+        click.echo(reply)
+
+
 if __name__ == "__main__":
     sys.exit(main())

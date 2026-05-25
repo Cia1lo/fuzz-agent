@@ -5,7 +5,10 @@
     <a href="/">Campaigns</a>
     <h1>{{ cid }}</h1>
   </div>
-  <button hx-post="/api/campaigns/{{ cid }}/stop" hx-target="#stop-result">Stop</button>
+  <div class="nav-links">
+    <a href="/chat?campaign_id={{ cid }}">Chat</a>
+    <button hx-post="/api/campaigns/{{ cid }}/stop" hx-target="#stop-result">Stop</button>
+  </div>
 </header>
 <div id="stop-result"></div>
 
