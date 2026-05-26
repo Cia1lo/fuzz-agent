@@ -1,6 +1,7 @@
 """FastAPI server for the Fuzz Agent web UI."""
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import ipaddress
@@ -196,17 +197,112 @@ def _chat_session_json(session: ChatSession, *, include_history: bool = False) -
     return data
 
 
+def _sse(event: str, data: dict[str, Any]) -> str:
+    payload = json.dumps(data, ensure_ascii=False, default=str)
+    return f"event: {event}\ndata: {payload}\n\n"
+
+
+def _chat_session_from_request(body: ChatRequest) -> ChatSession:
+    session_id = body.session_id.strip() or "default"
+    session = _load_chat_session(session_id) or ChatSession(session_id=session_id)
+    if body.campaign_id:
+        if not _known_campaign(body.campaign_id):
+            raise HTTPException(status_code=404, detail="campaign not found")
+        session.active_campaign_id = body.campaign_id
+    return session
+
+
+def _new_campaign_id(previous: set[str]) -> str | None:
+    for row in _rt().store.list_campaigns():
+        cid = row.get("cid")
+        if isinstance(cid, str) and cid not in previous:
+            return cid
+    return None
+
+
+def _event_key(event: dict[str, Any]) -> str:
+    return json.dumps(event, sort_keys=True, ensure_ascii=False, default=str)
+
+
+def _save_completed_chat_session(task: asyncio.Future[str], session: ChatSession) -> None:
+    if task.cancelled():
+        return
+    try:
+        task.result()
+    except Exception:  # noqa: BLE001
+        return
+    _save_chat_session(session)
+
+
+async def _chat_event_stream(body: ChatRequest) -> AsyncIterator[str]:
+    session = _chat_session_from_request(body)
+    before = {
+        row["cid"]
+        for row in _rt().store.list_campaigns()
+        if isinstance(row.get("cid"), str)
+    }
+    agent = ConversationAgent(_rt().store, _rt().bus)
+    yield _sse("status", {"message": "正在解析并执行指令"})
+    task = asyncio.create_task(agent.respond(session, body.message))
+    task.add_done_callback(lambda done: _save_completed_chat_session(done, session))
+
+    observed_cid: str | None = None
+    seen_events: set[str] = set()
+    last_stats_key = ""
+    ticks = 0
+    while not task.done():
+        new_cid = _new_campaign_id(before)
+        if new_cid and new_cid != observed_cid:
+            observed_cid = new_cid
+            yield _sse("campaign", {
+                "campaign_id": observed_cid,
+                "url": f"/campaigns/{observed_cid}",
+            })
+        if observed_cid:
+            stats = _jsonable(_rt().store.latest_stats(observed_cid) or {})
+            stats_key = _event_key(cast(dict[str, Any], stats))
+            if stats and stats_key != last_stats_key:
+                last_stats_key = stats_key
+                yield _sse("campaign_stats", cast(dict[str, Any], stats))
+            for event in _tail_events(observed_cid, limit=100):
+                key = _event_key(event)
+                if key in seen_events:
+                    continue
+                seen_events.add(key)
+                yield _sse("campaign_event", event)
+        ticks += 1
+        if ticks % 6 == 0:
+            yield _sse("status", {"message": "仍在执行，等待 agent 返回结果"})
+        await asyncio.sleep(0.5)
+
+    try:
+        reply = await task
+    except Exception as exc:  # noqa: BLE001
+        yield _sse("error", {"message": f"{type(exc).__name__}: {exc}"})
+        return
+    _save_chat_session(session)
+    yield _sse("final", {
+        "reply": reply,
+        **_chat_session_json(session, include_history=True),
+    })
+
+
 @app.get("/")
 async def index(request: Request) -> Any:
-    return templates.TemplateResponse(
-        request, "index.html",
-        {"campaigns": _rt().store.list_campaigns()},
-    )
+    return templates.TemplateResponse(request, "chat.html", {})
 
 
 @app.get("/chat")
 async def chat_page(request: Request) -> Any:
     return templates.TemplateResponse(request, "chat.html", {})
+
+
+@app.get("/campaigns")
+async def campaigns_page(request: Request) -> Any:
+    return templates.TemplateResponse(
+        request, "index.html",
+        {"campaigns": _rt().store.list_campaigns()},
+    )
 
 
 @app.get("/campaigns/{cid}")
@@ -249,12 +345,7 @@ async def api_chat_session(session_id: str) -> JSONResponse:
 
 @app.post("/api/chat")
 async def api_chat(body: ChatRequest) -> JSONResponse:
-    session_id = body.session_id.strip() or "default"
-    session = _load_chat_session(session_id) or ChatSession(session_id=session_id)
-    if body.campaign_id:
-        if not _known_campaign(body.campaign_id):
-            raise HTTPException(status_code=404, detail="campaign not found")
-        session.active_campaign_id = body.campaign_id
+    session = _chat_session_from_request(body)
     agent = ConversationAgent(_rt().store, _rt().bus)
     reply = await agent.respond(session, body.message)
     _save_chat_session(session)
@@ -262,6 +353,20 @@ async def api_chat(body: ChatRequest) -> JSONResponse:
         "reply": reply,
         **_chat_session_json(session, include_history=True),
     })
+
+
+@app.post("/api/chat/stream")
+async def api_chat_stream(body: ChatRequest) -> StreamingResponse:
+    _chat_session_from_request(body)
+    return StreamingResponse(
+        _chat_event_stream(body),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @app.get("/api/campaigns/{cid}")

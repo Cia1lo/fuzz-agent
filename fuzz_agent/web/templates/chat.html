@@ -15,7 +15,7 @@
   <section class="chat-workspace">
     <header class="topbar chat-topbar">
       <div class="chat-title">
-        <a href="/">Campaigns</a>
+        <a href="/campaigns">Campaigns</a>
         <h1>Command Chat</h1>
       </div>
       <div class="chat-meta">
@@ -140,7 +140,7 @@ function renderMessageText(target, text) {
   let index = 0;
   let match;
   while ((match = fencePattern.exec(text)) !== null) {
-    appendPlainText(target, text.slice(index, match.index));
+    appendMarkdownBlocks(target, text.slice(index, match.index));
     const pre = document.createElement("pre");
     const code = document.createElement("code");
     if (match[1]) code.dataset.language = match[1];
@@ -149,15 +149,121 @@ function renderMessageText(target, text) {
     target.appendChild(pre);
     index = fencePattern.lastIndex;
   }
-  appendPlainText(target, text.slice(index));
+  appendMarkdownBlocks(target, text.slice(index));
 }
 
-function appendPlainText(target, text) {
+function appendMarkdownBlocks(target, text) {
   if (!text) return;
-  const block = document.createElement("div");
-  block.className = "chat-plain";
-  block.textContent = text.trim();
-  target.appendChild(block);
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const paragraph = [];
+  let list = null;
+
+  function flushParagraph() {
+    const content = paragraph.join("\n").trim();
+    paragraph.length = 0;
+    if (!content) return;
+    const block = document.createElement("p");
+    block.className = "chat-paragraph";
+    appendInlineMarkdown(block, content);
+    target.appendChild(block);
+  }
+
+  function flushList() {
+    if (!list) return;
+    target.appendChild(list);
+    list = null;
+  }
+
+  lines.forEach((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+    const heading = /^(#{1,4})\s+(.+)$/.exec(trimmed);
+    if (heading) {
+      flushParagraph();
+      flushList();
+      const level = Math.min(6, heading[1].length + 2);
+      const block = document.createElement(`h${level}`);
+      block.className = "chat-heading";
+      appendInlineMarkdown(block, heading[2]);
+      target.appendChild(block);
+      return;
+    }
+    const unordered = /^[-*]\s+(.+)$/.exec(trimmed);
+    const ordered = /^(\d+)\.\s+(.+)$/.exec(trimmed);
+    if (unordered || ordered) {
+      flushParagraph();
+      const tag = ordered ? "ol" : "ul";
+      if (!list || list.tagName.toLowerCase() !== tag) {
+        flushList();
+        list = document.createElement(tag);
+        list.className = "chat-list";
+      }
+      const item = document.createElement("li");
+      appendInlineMarkdown(item, (unordered || ordered)[ordered ? 2 : 1]);
+      list.appendChild(item);
+      return;
+    }
+    flushList();
+    paragraph.push(line);
+  });
+  flushParagraph();
+  flushList();
+}
+
+function appendInlineMarkdown(target, text) {
+  const tokenPattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\([^) \n]+\))/g;
+  const lines = text.split("\n");
+  lines.forEach((line, lineIndex) => {
+    if (lineIndex > 0) target.appendChild(document.createElement("br"));
+    let index = 0;
+    let match;
+    while ((match = tokenPattern.exec(line)) !== null) {
+      appendText(target, line.slice(index, match.index));
+      appendMarkdownToken(target, match[0]);
+      index = tokenPattern.lastIndex;
+    }
+    appendText(target, line.slice(index));
+  });
+}
+
+function appendText(target, text) {
+  if (text) target.appendChild(document.createTextNode(text));
+}
+
+function appendMarkdownToken(target, token) {
+  if (token.startsWith("`")) {
+    const code = document.createElement("code");
+    code.textContent = token.slice(1, -1);
+    target.appendChild(code);
+    return;
+  }
+  if (token.startsWith("**")) {
+    const strong = document.createElement("strong");
+    strong.textContent = token.slice(2, -2);
+    target.appendChild(strong);
+    return;
+  }
+  const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(token);
+  if (link && safeHref(link[2])) {
+    const anchor = document.createElement("a");
+    anchor.href = link[2];
+    anchor.textContent = link[1];
+    if (/^https?:\/\//i.test(link[2])) {
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+    }
+    target.appendChild(anchor);
+    return;
+  }
+  appendText(target, token);
+}
+
+function safeHref(value) {
+  return /^(https?:\/\/|\/(?!\/)|#)/i.test(value);
 }
 
 function messageActions(text) {
@@ -186,7 +292,7 @@ function renderHistory(history) {
   history.forEach((turn) => addMessage(turn.role === "user" ? "user" : "assistant", turn.content));
 }
 
-function addBusy() {
+function addBusy(text = "working") {
   const row = document.createElement("div");
   row.className = "chat-row assistant busy";
   row.id = "chat-busy";
@@ -197,11 +303,19 @@ function addBusy() {
   tag.textContent = "agent";
   const body = document.createElement("div");
   body.className = "chat-text";
-  body.textContent = "working";
+  body.textContent = text;
   bubble.append(tag, body);
   row.appendChild(bubble);
   log.appendChild(row);
   log.scrollTop = log.scrollHeight;
+}
+
+function updateBusy(text) {
+  const body = document.querySelector("#chat-busy .chat-text");
+  if (body && text) {
+    body.textContent = text;
+    log.scrollTop = log.scrollHeight;
+  }
 }
 
 function clearBusy() {
@@ -209,14 +323,72 @@ function clearBusy() {
   if (row) row.remove();
 }
 
+async function readEventStream(response, onEvent) {
+  if (!response.body) {
+    throw new Error("Streaming is not supported by this browser");
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const {value, done} = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), {stream: !done});
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      dispatchSseBlock(block, onEvent);
+      boundary = buffer.indexOf("\n\n");
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) {
+    dispatchSseBlock(buffer, onEvent);
+  }
+}
+
+function dispatchSseBlock(block, onEvent) {
+  let eventName = "message";
+  const dataLines = [];
+  block.split(/\r?\n/).forEach((line) => {
+    if (line.startsWith("event:")) {
+      eventName = line.slice(6).trim();
+    } else if (line.startsWith("data:")) {
+      dataLines.push(line.slice(5).trimStart());
+    }
+  });
+  const rawData = dataLines.join("\n");
+  const data = rawData ? JSON.parse(rawData) : {};
+  onEvent(eventName, data);
+}
+
+function describeStreamEvent(eventName, data) {
+  if (eventName === "status") {
+    return data.message || "working";
+  }
+  if (eventName === "campaign") {
+    return `campaign ${data.campaign_id} 已启动`;
+  }
+  if (eventName === "campaign_stats") {
+    const elapsed = data.elapsed_sec !== undefined ? `${data.elapsed_sec}s` : "running";
+    const crashes = data.unique_crashes !== undefined ? `, crashes ${data.unique_crashes}` : "";
+    return `campaign ${data.campaign_id || currentCampaignId}: ${data.status || "running"} ${elapsed}${crashes}`;
+  }
+  if (eventName === "campaign_event") {
+    return `event: ${data.kind || "campaign_event"}`;
+  }
+  return "";
+}
+
 async function send(message) {
   addMessage("user", message);
-  addBusy();
+  addBusy("connecting");
   submit.disabled = true;
   input.disabled = true;
   rememberMessage(message);
+  let receivedFinal = false;
   try {
-    const response = await fetch("/api/chat", {
+    const response = await fetch("/api/chat/stream", {
       method: "POST",
       headers: {"content-type": "application/json"},
       body: JSON.stringify({
@@ -225,13 +397,30 @@ async function send(message) {
         message: normalizeCommand(message),
       }),
     });
-    const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.detail || response.statusText);
+      const text = await response.text();
+      throw new Error(text || response.statusText);
     }
-    clearBusy();
-    setCurrentSession(data.session_id || currentSessionId, data.active_campaign_id || currentCampaignId);
-    addMessage("assistant", data.reply || "");
+    await readEventStream(response, (eventName, data) => {
+      if (eventName === "final") {
+        receivedFinal = true;
+        clearBusy();
+        setCurrentSession(data.session_id || currentSessionId, data.active_campaign_id || currentCampaignId);
+        addMessage("assistant", data.reply || "");
+        return;
+      }
+      if (eventName === "error") {
+        throw new Error(data.message || "stream failed");
+      }
+      if (eventName === "campaign" && data.campaign_id) {
+        setCurrentSession(currentSessionId, data.campaign_id);
+      }
+      const description = describeStreamEvent(eventName, data);
+      if (description) updateBusy(description);
+    });
+    if (!receivedFinal) {
+      throw new Error("stream ended before final response");
+    }
     await loadSessions();
   } catch (error) {
     clearBusy();

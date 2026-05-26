@@ -49,10 +49,20 @@ def test_index_renders(client):
     response = client.get("/")
 
     assert response.status_code == 200
+    assert "<h1>Command Chat</h1>" in response.text
+    assert 'id="chat-form"' in response.text
+    assert 'href="/campaigns"' in response.text
+
+
+def test_campaigns_page_renders(client):
+    response = client.get("/campaigns")
+
+    assert response.status_code == 200
     assert "Fuzz Agent" in response.text
-    assert 'href="/chat"' in response.text
+    assert 'href="/"' in response.text
     assert 'id="campaign-form"' in response.text
     assert 'action="/api/campaigns"' in response.text
+    assert 'hx-get="/campaigns?fragment=table"' in response.text
 
 
 def test_chat_page_renders(client):
@@ -66,7 +76,10 @@ def test_chat_page_renders(client):
     assert 'id="session-list"' in response.text
     assert 'id="new-session"' in response.text
     assert 'id="command-hints"' in response.text
-    assert 'fetch("/api/chat"' in response.text
+    assert 'fetch("/api/chat/stream"' in response.text
+    assert "readEventStream" in response.text
+    assert "appendMarkdownBlocks" in response.text
+    assert "appendInlineMarkdown" in response.text
 
 
 def test_api_chat_greeting(client, monkeypatch):
@@ -83,6 +96,23 @@ def test_api_chat_greeting(client, monkeypatch):
     assert "你好" in data["reply"]
     assert data["turn_count"] == 2
     assert data["history"][0]["role"] == "user"
+
+
+def test_api_chat_stream_greeting(client, monkeypatch):
+    monkeypatch.setenv("FUZZ_AGENT_CHAT_LLM", "0")
+
+    with client.stream("POST", "/api/chat/stream", json={
+        "session_id": "web-stream-test",
+        "message": "你好",
+    }) as response:
+        body = "".join(response.iter_text())
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: status" in body
+    assert "event: final" in body
+    assert '"session_id": "web-stream-test"' in body
+    assert "你好" in body
 
 
 def test_api_chat_sessions_list_and_detail(client, monkeypatch):
@@ -144,6 +174,16 @@ def test_api_chat_uses_campaign_context(client, web_rt, make_stats, monkeypatch)
 def test_api_chat_rejects_unknown_campaign(client):
     response = client.post("/api/chat", json={
         "session_id": "web-missing-campaign-test",
+        "campaign_id": "missing",
+        "message": "status",
+    })
+
+    assert response.status_code == 404
+
+
+def test_api_chat_stream_rejects_unknown_campaign(client):
+    response = client.post("/api/chat/stream", json={
+        "session_id": "web-missing-campaign-stream-test",
         "campaign_id": "missing",
         "message": "status",
     })

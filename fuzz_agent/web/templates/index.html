@@ -3,7 +3,7 @@
 <header class="topbar">
   <h1>Fuzz Agent</h1>
   <div class="nav-links">
-    <a href="/chat">Chat</a>
+    <a href="/">Chat</a>
     <div id="flash"></div>
   </div>
 </header>
@@ -26,7 +26,7 @@
 </section>
 
 <div id="campaign-table"
-     hx-get="/?fragment=table"
+     hx-get="/campaigns?fragment=table"
      hx-trigger="every 5s"
      hx-swap="outerHTML"
      hx-select="#campaign-table">

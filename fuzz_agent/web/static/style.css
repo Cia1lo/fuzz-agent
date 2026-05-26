@@ -369,6 +369,29 @@ tbody tr:nth-child(even) { background: #14181c; }
   gap: 8px;
   color: var(--text);
 }
+.chat-text p,
+.chat-text ul,
+.chat-text ol,
+.chat-text h3,
+.chat-text h4,
+.chat-text h5,
+.chat-text h6 {
+  margin: 0;
+}
+.chat-heading {
+  color: var(--coverage-green);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.chat-list {
+  display: grid;
+  gap: 4px;
+  padding-left: 20px;
+}
+.chat-paragraph {
+  line-height: 1.55;
+}
 .chat-text pre {
   max-width: 100%;
   margin: 0;
@@ -378,12 +401,27 @@ tbody tr:nth-child(even) { background: #14181c; }
   background: var(--console-inset);
   padding: 9px 10px;
 }
-.chat-text code {
+.chat-text pre code {
   font: inherit;
   white-space: pre;
 }
-.chat-plain {
-  white-space: pre-wrap;
+.chat-text :not(pre) > code {
+  border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  background: var(--console-inset);
+  color: var(--coverage-green);
+  padding: 1px 4px;
+  white-space: normal;
+}
+.chat-text strong {
+  font-weight: 700;
+}
+.chat-text a {
+  color: var(--coverage-green);
+  text-decoration: none;
+}
+.chat-text a:hover {
+  text-decoration: underline;
 }
 .chat-actions {
   display: flex;
