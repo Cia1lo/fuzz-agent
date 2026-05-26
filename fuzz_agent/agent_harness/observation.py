@@ -7,6 +7,8 @@ from typing import Any
 
 from ..state.models import EngineKind
 
+AGENT_OBSERVATION_SCHEMA_VERSION = 1
+
 
 @dataclass(frozen=True)
 class ValidationResult:
@@ -28,10 +30,40 @@ class AgentObservation:
     validations: list[ValidationResult] = field(default_factory=list)
     score: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+    schema_version: int = AGENT_OBSERVATION_SCHEMA_VERSION
 
     @property
     def all_validations_passed(self) -> bool:
         return all(v.passed for v in self.validations)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> AgentObservation:
+        version = data.get("schema_version", AGENT_OBSERVATION_SCHEMA_VERSION)
+        if version != AGENT_OBSERVATION_SCHEMA_VERSION:
+            raise ValueError(f"unsupported AgentObservation schema_version: {version}")
+        validations_raw = data.get("validations", [])
+        validations = [
+            ValidationResult(
+                name=str(item.get("name", "")),
+                passed=bool(item.get("passed", False)),
+                detail=str(item.get("detail", "")),
+            )
+            for item in validations_raw
+            if isinstance(item, dict)
+        ]
+        artifacts = data.get("artifacts", {})
+        score = data.get("score", {})
+        raw = data.get("raw", {})
+        return cls(
+            kind=str(data.get("kind", "")),
+            summary=str(data.get("summary", "")),
+            diagnostics=str(data.get("diagnostics", "")),
+            artifacts=artifacts if isinstance(artifacts, dict) else {},
+            validations=validations,
+            score=score if isinstance(score, dict) else {},
+            raw=raw if isinstance(raw, dict) else {},
+            schema_version=version,
+        )
 
 
 @dataclass(frozen=True)
@@ -66,6 +98,7 @@ class HarnessAttemptObservation:
     diagnostics: str
     validations: list[ValidationResult] = field(default_factory=list)
     score: AgentStepScore | None = None
+    build_failure: dict[str, str] = field(default_factory=dict)
 
     @property
     def is_accepted(self) -> bool:
@@ -91,6 +124,7 @@ class HarnessAttemptObservation:
             raw={
                 "build_passed": self.build_passed,
                 "accepted": self.is_accepted,
+                "build_failure": self.build_failure,
             },
         )
 
@@ -98,6 +132,7 @@ class HarnessAttemptObservation:
 def agent_observation_to_dict(observation: AgentObservation) -> dict[str, Any]:
     """Return a JSON-friendly dict while preserving Path/Enum values for store serialization."""
     return {
+        "schema_version": observation.schema_version,
         "kind": observation.kind,
         "summary": observation.summary,
         "diagnostics": observation.diagnostics,

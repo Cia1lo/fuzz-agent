@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .observation import (
+    AGENT_OBSERVATION_SCHEMA_VERSION,
     AgentObservation,
     AgentStepScore,
     HarnessAttemptObservation,
@@ -17,6 +18,7 @@ from .trace import AgentTraceRecord, AgentTraceRecorder
 __all__ = [
     "AgentHarnessResult",
     "AgentHarnessSession",
+    "AGENT_OBSERVATION_SCHEMA_VERSION",
     "AgentObservation",
     "AgentStepScore",
     "AgentTraceRecord",

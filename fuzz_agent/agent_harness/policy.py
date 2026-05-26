@@ -156,10 +156,15 @@ def _validate_payload(
     if action is HarnessAction.PATCH_HARNESS:
         path = payload.get("path")
         patch = payload.get("patch")
+        source = payload.get("source")
         if not isinstance(path, str) or not path:
             raise ValueError("patch_harness payload requires string path")
+        if patch is None and source is None:
+            raise ValueError("patch_harness payload requires patch or source")
         if patch is not None and not isinstance(patch, str):
             raise ValueError("patch_harness payload patch must be a string")
+        if source is not None and not isinstance(source, str):
+            raise ValueError("patch_harness payload source must be a string")
         source_path = observation_source_path(observation)
         if source_path is not None:
             requested = Path(path).expanduser()

@@ -7,12 +7,16 @@ from pathlib import Path
 import pytest
 
 from fuzz_agent.agent_harness import (
+    AgentObservation,
     AgentHarnessSession,
     HarnessAction,
     HarnessAttemptObservation,
     HarnessBuildError,
+    HarnessDecision,
+    HarnessPolicy,
     LLMHarnessPolicy,
     ValidationResult,
+    agent_observation_to_dict,
 )
 from fuzz_agent.agent_harness.validators import (
     validate_crash_not_from_harness,
@@ -55,6 +59,27 @@ def _spec(target: TargetProfile, attempt: int) -> HarnessSpec:
         source_path=harness,
         attempt=attempt,
     )
+
+
+def test_agent_observation_schema_roundtrip():
+    observation = AgentObservation(
+        kind="harness_build_failure",
+        summary="compile failed",
+        diagnostics="missing include",
+        validations=[ValidationResult("build_passed", False, "compile failed")],
+        score={"compiled": False},
+    )
+
+    restored = AgentObservation.from_dict(agent_observation_to_dict(observation))
+
+    assert restored.schema_version == observation.schema_version
+    assert restored.kind == observation.kind
+    assert restored.validations[0].name == "build_passed"
+    assert restored.score == {"compiled": False}
+
+    legacy = agent_observation_to_dict(observation)
+    legacy.pop("schema_version")
+    assert AgentObservation.from_dict(legacy).schema_version == observation.schema_version
 
 
 def test_agent_harness_session_retries_with_build_diagnostics(tmp_path):
@@ -103,6 +128,218 @@ def test_agent_harness_session_retries_with_build_diagnostics(tmp_path):
     assert result.trace_records[1].observation["kind"] == "harness_accepted"
     assert result.trace_records[0].decision["action"] is HarnessAction.REGENERATE_HARNESS
     assert result.trace_records[1].decision["action"] is HarnessAction.ACCEPT_HARNESS
+
+
+def test_agent_harness_session_classifies_build_failure(tmp_path):
+    target = _target(tmp_path)
+
+    def generate(attempt: int, diagnostics: str | None) -> HarnessSpec:
+        return _spec(target, attempt)
+
+    async def build(spec: HarnessSpec) -> BuildArtifact:
+        out_dir = spec.target.root / ".fuzz" / "build"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log = out_dir / f"build_{spec.entry}_attempt_{spec.attempt}.log"
+        log.write_text("fatal error: 'parser.h' file not found\n", encoding="utf-8")
+        raise RuntimeError("compile failed")
+
+    session = AgentHarnessSession(
+        target=target,
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        invariants=[],
+        generate_harness=generate,
+        build=build,
+        max_attempts=1,
+    )
+
+    with pytest.raises(HarnessBuildError) as exc:
+        asyncio.run(session.run())
+
+    failure = exc.value.trace_records[0].observation["raw"]["build_failure"]
+    assert failure["kind"] == "missing_include"
+    assert failure["symbol"] == "parser.h"
+
+
+def test_agent_harness_session_applies_patch_harness_action(tmp_path):
+    target = _target(tmp_path)
+    fixed_source = (
+        "int ParseThing(const unsigned char *, unsigned long);\n"
+        "int LLVMFuzzerTestOneInput(const unsigned char *data, unsigned long size) {\n"
+        "  return ParseThing(data, size);\n"
+        "}\n"
+    )
+
+    def generate(attempt: int, diagnostics: str | None) -> HarnessSpec:
+        spec = _spec(target, attempt)
+        spec.source_path.write_text("bad harness", encoding="utf-8")
+        return spec
+
+    async def build(spec: HarnessSpec) -> BuildArtifact:
+        out_dir = spec.target.root / ".fuzz" / "build"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log = out_dir / f"build_{spec.entry}_attempt_{spec.attempt}.log"
+        log.write_text("build log", encoding="utf-8")
+        if "bad harness" in spec.source_path.read_text(encoding="utf-8"):
+            raise RuntimeError("compile failed")
+        binary = out_dir / f"fuzz_{spec.entry}_attempt_{spec.attempt}"
+        binary.write_text("binary", encoding="utf-8")
+        return BuildArtifact(
+            binary_path=binary,
+            engine=EngineKind.LIBFUZZER,
+            sanitizers=[],
+            build_log_path=log,
+            harness_source_path=spec.source_path,
+        )
+
+    class PatchPolicy(HarnessPolicy):
+        def decide(self, observation, *, attempt: int, max_attempts: int) -> HarnessDecision:
+            if observation.kind == "harness_build_failure":
+                return HarnessDecision(
+                    HarnessAction.PATCH_HARNESS,
+                    "replace bad harness source",
+                    {"path": str(observation.artifacts["source_path"]), "source": fixed_source},
+                )
+            return super().decide(observation, attempt=attempt, max_attempts=max_attempts)
+
+    result = asyncio.run(AgentHarnessSession(
+        target=target,
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        invariants=[],
+        generate_harness=generate,
+        build=build,
+        policy=PatchPolicy(),
+        max_attempts=2,
+    ).run())
+
+    assert result.spec.attempt == 2
+    assert "ParseThing" in result.spec.source_path.read_text(encoding="utf-8")
+    assert result.trace_records[0].action["applied"] is True
+    assert result.trace_records[0].action["action_type"] == "patch_harness"
+
+
+def test_agent_harness_session_applies_dictionary_action(tmp_path):
+    target = _target(tmp_path)
+
+    def generate(attempt: int, diagnostics: str | None) -> HarnessSpec:
+        return _spec(target, attempt)
+
+    async def build(spec: HarnessSpec) -> BuildArtifact:
+        out_dir = spec.target.root / ".fuzz" / "build"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log = out_dir / f"build_{spec.entry}_attempt_{spec.attempt}.log"
+        log.write_text("ok", encoding="utf-8")
+        binary = out_dir / f"fuzz_{spec.entry}_attempt_{spec.attempt}"
+        binary.write_text("binary", encoding="utf-8")
+        return BuildArtifact(
+            binary_path=binary,
+            engine=EngineKind.LIBFUZZER,
+            sanitizers=[],
+            build_log_path=log,
+            harness_source_path=spec.source_path,
+        )
+
+    async def target_reached(spec: HarnessSpec, artifact: BuildArtifact) -> ValidationResult:
+        del artifact
+        return ValidationResult("target_reached", spec.dictionary_path is not None, "needs dict")
+
+    class DictionaryPolicy(HarnessPolicy):
+        def decide(self, observation, *, attempt: int, max_attempts: int) -> HarnessDecision:
+            if observation.kind == "harness_target_not_reached":
+                return HarnessDecision(
+                    HarnessAction.ADD_DICTIONARY,
+                    "add magic token",
+                    {"tokens": ["MAGIC"]},
+                )
+            return super().decide(observation, attempt=attempt, max_attempts=max_attempts)
+
+    result = asyncio.run(AgentHarnessSession(
+        target=target,
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        invariants=[],
+        generate_harness=generate,
+        build=build,
+        target_reached=target_reached,
+        policy=DictionaryPolicy(),
+        max_attempts=2,
+    ).run())
+
+    assert result.spec.dictionary_path is not None
+    assert result.spec.dictionary_path.read_text(encoding="utf-8").splitlines() == ['"MAGIC"']
+
+
+def test_agent_harness_session_changes_entry_point(tmp_path):
+    target = TargetProfile(
+        root=tmp_path,
+        language=Language.CPP,
+        entry_points=["ParseThing", "OtherThing"],
+        build_system="cmake",
+    )
+
+    def generate_for_entry(entry: str, attempt: int, diagnostics: str | None) -> HarnessSpec:
+        del diagnostics
+        spec = _spec(target, attempt)
+        source = spec.source_path.read_text(encoding="utf-8").replace("ParseThing", entry)
+        path = spec.source_path.parent.parent / entry / f"attempt_{attempt}.cc"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+        return HarnessSpec(
+            target=target,
+            entry=entry,
+            engine=EngineKind.LIBFUZZER,
+            source_path=path,
+            attempt=attempt,
+        )
+
+    async def build(spec: HarnessSpec) -> BuildArtifact:
+        out_dir = spec.target.root / ".fuzz" / "build"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log = out_dir / f"build_{spec.entry}_attempt_{spec.attempt}.log"
+        log.write_text("ok", encoding="utf-8")
+        binary = out_dir / f"fuzz_{spec.entry}_attempt_{spec.attempt}"
+        binary.write_text("binary", encoding="utf-8")
+        return BuildArtifact(
+            binary_path=binary,
+            engine=EngineKind.LIBFUZZER,
+            sanitizers=[],
+            build_log_path=log,
+            harness_source_path=spec.source_path,
+        )
+
+    async def target_reached(spec: HarnessSpec, artifact: BuildArtifact) -> ValidationResult:
+        del artifact
+        return ValidationResult("target_reached", spec.entry == "OtherThing", spec.entry)
+
+    class ChangeEntryPolicy(HarnessPolicy):
+        def decide(self, observation, *, attempt: int, max_attempts: int) -> HarnessDecision:
+            if observation.kind == "harness_target_not_reached":
+                return HarnessDecision(
+                    HarnessAction.CHANGE_ENTRY_POINT,
+                    "try alternate parser",
+                    {"entry": "OtherThing"},
+                )
+            return super().decide(observation, attempt=attempt, max_attempts=max_attempts)
+
+    result = asyncio.run(AgentHarnessSession(
+        target=target,
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        invariants=[],
+        generate_harness=lambda attempt, diagnostics: generate_for_entry(
+            "ParseThing",
+            attempt,
+            diagnostics,
+        ),
+        generate_harness_for_entry=generate_for_entry,
+        build=build,
+        target_reached=target_reached,
+        policy=ChangeEntryPolicy(),
+        max_attempts=2,
+    ).run())
+
+    assert result.spec.entry == "OtherThing"
 
 
 def test_agent_harness_session_fails_after_validation_failures(tmp_path):
@@ -262,6 +499,54 @@ def test_target_reached_artifact_validator_accepts_runtime_coverage(monkeypatch,
     assert "runtime coverage" in result.detail
 
 
+def test_target_reached_artifact_validator_accepts_coverage_summary(tmp_path):
+    target = _target(tmp_path)
+    spec = _spec(target, 1)
+    binary = tmp_path / ".fuzz" / "build" / "fuzz"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("binary", encoding="utf-8")
+    (binary.parent / "coverage_summary.txt").write_text(
+        "Filename Regions Cover\nparser.cc: ParseThing covered\n",
+        encoding="utf-8",
+    )
+    artifact = BuildArtifact(
+        binary_path=binary,
+        engine=EngineKind.LIBFUZZER,
+        sanitizers=[],
+        build_log_path=tmp_path / "build.log",
+        harness_source_path=spec.source_path,
+    )
+
+    result = validate_target_reached_by_artifact(spec, artifact)
+
+    assert result.passed
+    assert "coverage artifact" in result.detail
+
+
+def test_target_reached_artifact_validator_rejects_uncovered_entry(tmp_path):
+    target = _target(tmp_path)
+    spec = _spec(target, 1)
+    binary = tmp_path / ".fuzz" / "build" / "fuzz"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("binary", encoding="utf-8")
+    (binary.parent / "coverage_uncovered.json").write_text(
+        '[{"func": "ParseThing", "file": "parser.cc"}]',
+        encoding="utf-8",
+    )
+    artifact = BuildArtifact(
+        binary_path=binary,
+        engine=EngineKind.LIBFUZZER,
+        sanitizers=[],
+        build_log_path=tmp_path / "build.log",
+        harness_source_path=spec.source_path,
+    )
+
+    result = validate_target_reached_by_artifact(spec, artifact)
+
+    assert not result.passed
+    assert "uncovered" in result.detail
+
+
 def test_validate_crash_not_from_harness_flags_harness_top_frame(tmp_path):
     harness = tmp_path / "attempt_1.cc"
     crash = CrashRecord(
@@ -323,7 +608,7 @@ def test_llm_harness_policy_validates_structured_decision(monkeypatch, tmp_path)
         lambda *args, **kwargs: {
             "action": "patch_harness",
             "reason": "missing include",
-            "payload": {"path": str(spec.source_path)},
+            "payload": {"path": str(spec.source_path), "source": spec.source_path.read_text()},
         },
     )
 

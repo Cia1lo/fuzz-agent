@@ -242,6 +242,13 @@ class Orchestrator:
                 attempt=attempt,
                 diagnostics=diagnostics,
             ),
+            generate_harness_for_entry=lambda entry, attempt, diagnostics: self._generate_harness(
+                target,
+                entry,
+                goal,
+                attempt=attempt,
+                diagnostics=diagnostics,
+            ),
             build=self._build,
             smoke_run=self._smoke_run,
             target_reached=self._target_reached,

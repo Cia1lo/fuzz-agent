@@ -1,6 +1,7 @@
 """Validation helpers for separating agent/harness failures from target findings."""
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -9,6 +10,13 @@ from pathlib import Path
 
 from ..state.models import BuildArtifact, CrashRecord, EngineKind, HarnessSpec
 from .observation import AgentStepScore, ValidationResult
+
+_BUILD_FAILURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("missing_include", re.compile(r"fatal error: ['<](?P<symbol>[^'>]+)['>] file not found")),
+    ("undefined_symbol", re.compile(r"undefined (?:reference|symbol).*?(?P<symbol>[A-Za-z_]\w*)")),
+    ("signature_mismatch", re.compile(r"(?:no matching function|too (?:few|many) arguments|cannot convert)")),
+    ("missing_type", re.compile(r"(?:unknown type name|does not name a type) ['`]?(?P<symbol>[A-Za-z_]\w*)")),
+)
 
 
 def validate_build_artifact(spec: HarnessSpec, artifact: BuildArtifact) -> list[ValidationResult]:
@@ -41,6 +49,21 @@ def validate_build_artifact(spec: HarnessSpec, artifact: BuildArtifact) -> list[
     return results
 
 
+def classify_build_failure(log_text: str) -> dict[str, str]:
+    """Classify common compiler/linker failures from a build log tail."""
+    for kind, pattern in _BUILD_FAILURE_PATTERNS:
+        match = pattern.search(log_text)
+        if match is None:
+            continue
+        symbol = match.groupdict().get("symbol") or ""
+        return {
+            "kind": kind,
+            "symbol": symbol,
+            "hint": _build_failure_hint(kind, symbol),
+        }
+    return {"kind": "unknown", "symbol": "", "hint": "inspect build log tail"}
+
+
 def score_build_attempt(
     *,
     compiled: bool,
@@ -64,6 +87,18 @@ def score_build_attempt(
         artifact_available=bool(artifact_path and artifact_path.exists())
         and "artifact_exists" not in failed,
     )
+
+
+def _build_failure_hint(kind: str, symbol: str) -> str:
+    if kind == "missing_include":
+        return f"include or expose header for {symbol}" if symbol else "add missing include path"
+    if kind == "undefined_symbol":
+        return f"link target object or library that defines {symbol}" if symbol else "add missing link input"
+    if kind == "signature_mismatch":
+        return "adjust harness call to the target function signature"
+    if kind == "missing_type":
+        return f"include declaration for type {symbol}" if symbol else "include missing type declaration"
+    return "inspect build log tail"
 
 
 def validate_target_referenced_by_harness(spec: HarnessSpec) -> ValidationResult:
@@ -93,6 +128,13 @@ def validate_target_reached_by_artifact(
     source_check = validate_target_referenced_by_harness(spec)
     if not source_check.passed:
         return source_check
+
+    coverage_check = validate_target_reached_from_coverage_artifacts(
+        spec.entry,
+        _coverage_artifact_candidates(artifact),
+    )
+    if coverage_check is not None:
+        return coverage_check
 
     runtime_check = _entry_runtime_coverage_evidence(spec.entry, artifact)
     if runtime_check:
@@ -130,6 +172,35 @@ def validate_target_reached_from_frames(entry: str, frames: list[str]) -> Valida
     return ValidationResult("target_reached", False, f"entry {entry} not found in frames")
 
 
+def validate_target_reached_from_coverage_artifacts(
+    entry: str,
+    paths: list[Path],
+) -> ValidationResult | None:
+    """Use persisted coverage files when they explicitly mention the selected entry."""
+    for path in paths:
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            if path.suffix == ".json":
+                if _entry_is_uncovered(entry, path):
+                    return ValidationResult(
+                        "target_reached",
+                        False,
+                        f"coverage artifact marks entry {entry} as uncovered: {path}",
+                    )
+                continue
+            text = path.read_text(errors="replace")
+        except (OSError, json.JSONDecodeError):
+            continue
+        if _coverage_text_marks_entry_covered(entry, text):
+            return ValidationResult(
+                "target_reached",
+                True,
+                f"coverage artifact mentions covered entry {entry}: {path}",
+            )
+    return None
+
+
 def _entry_symbol_evidence(entry: str, binary_path: Path) -> bool | None:
     nm = shutil.which("nm")
     if nm is None or not binary_path.exists() or not binary_path.is_file():
@@ -146,6 +217,49 @@ def _entry_symbol_evidence(entry: str, binary_path: Path) -> bool | None:
     if result.returncode != 0 or not result.stdout.strip():
         return None
     return bool(re.search(rf"\b{re.escape(entry)}\b", result.stdout))
+
+
+def _coverage_artifact_candidates(artifact: BuildArtifact) -> list[Path]:
+    dirs = [
+        artifact.binary_path.parent,
+        artifact.binary_path.parent.parent,
+    ]
+    names = ["coverage_summary.txt", "coverage_uncovered.json"]
+    out: list[Path] = []
+    for directory in dirs:
+        for name in names:
+            path = directory / name
+            if path not in out:
+                out.append(path)
+    return out
+
+
+def _entry_is_uncovered(entry: str, path: Path) -> bool:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        return False
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        func = item.get("func")
+        if isinstance(func, str) and _entry_name_matches(entry, func):
+            return True
+    return False
+
+
+def _coverage_text_marks_entry_covered(entry: str, text: str) -> bool:
+    uncovered = False
+    for line in text.splitlines():
+        if line.strip().lower().startswith("uncovered functions"):
+            uncovered = True
+            continue
+        if _entry_name_matches(entry, line):
+            return not uncovered
+    return False
+
+
+def _entry_name_matches(entry: str, text: str) -> bool:
+    return bool(re.search(rf"\b{re.escape(entry)}\b", text))
 
 
 def _entry_runtime_coverage_evidence(entry: str, artifact: BuildArtifact) -> bool | None:
