@@ -659,13 +659,29 @@ def _format_campaign_summary(summary: dict[str, Any]) -> str:
     cid = summary.get("campaign_id")
     stats = summary.get("stats") or {}
     paths = summary.get("paths") or {}
-    return (
-        f"campaign `{cid}` 已完成。\n"
-        f"状态: {stats.get('status', 'unknown')}\n"
-        f"运行时间: {stats.get('elapsed_sec', 0)}s\n"
-        f"unique crashes: {stats.get('unique_crashes', 0)}\n"
-        f"agent trace: `{paths.get('agent_trace', '')}`"
-    )
+    crashes = _summary_crashes(summary)
+    unique_crashes = _int_value(stats.get("unique_crashes"))
+    has_crashes = bool(crashes) or unique_crashes > 0
+    status = str(stats.get("status") or "unknown")
+    lines = [
+        "结果",
+        _campaign_result_sentence(str(cid), status, has_crashes, len(crashes) or unique_crashes),
+        "",
+        "概览",
+        *_campaign_overview_lines(str(cid), stats),
+    ]
+    if crashes:
+        lines.extend(["", "Crash 证据", *_format_crash_summary(crashes, paths)])
+    elif unique_crashes > 0:
+        lines.extend([
+            "",
+            "Crash 证据",
+            "- 已记录 crash 计数，但当前 summary 中没有分诊记录。",
+            f"- crash dir: `{paths.get('crash_dir', '')}`",
+        ])
+    lines.extend(["", "Artifacts", *_artifact_lines(paths)])
+    lines.extend(["", "下一步", *_next_step_lines(str(cid), status, has_crashes)])
+    return "\n".join(lines)
 
 
 def _format_stats(stats: CampaignStats) -> str:
@@ -708,14 +724,205 @@ def _dict_field(row: dict[str, Any], key: str) -> dict[str, Any]:
 def _format_crashes(cid: str, crashes: list[CrashRecord]) -> str:
     if not crashes:
         return f"campaign `{cid}` 没有可展示的 crash。"
-    lines = [f"campaign `{cid}` crash 分诊结果:"]
-    for crash in crashes[:5]:
+    lines = [
+        "结果",
+        f"campaign `{cid}` crash 分诊结果如下，共 {len(crashes)} 个结果。",
+        "",
+        "Crash 证据",
+    ]
+    for idx, crash in enumerate(crashes[:5], start=1):
         frames = "; ".join(crash.top_frames[:3])
         lines.append(
-            f"- `{crash.crash_id}` status={crash.status.value} "
+            f"{idx}. `{crash.crash_id}` status={crash.status.value} "
             f"kind={crash.sanitizer_kind or 'unknown'} frames={frames}"
         )
+        lines.extend(_format_crash_record_details(crash))
+    if len(crashes) > 5:
+        lines.append(f"- 还有 {len(crashes) - 5} 个 crash 未展示")
+    lines.extend(["", "下一步", f"- 打开 campaign 页面 `/campaigns/{cid}` 查看 run log、harness 和 artifact。"])
     return "\n".join(lines)
+
+
+def _format_crash_record_details(crash: CrashRecord) -> list[str]:
+    lines: list[str] = []
+    lines.append(f"  input: `{crash.input_path}`")
+    preview = _input_preview(crash.input_path)
+    if preview:
+        lines.append(f"  input preview: `{preview}`")
+    if crash.minimized_path:
+        lines.append(f"  minimized: `{crash.minimized_path}`")
+    if crash.reproduce_log_path:
+        lines.append(f"  reproduce log: `{crash.reproduce_log_path}`")
+    if crash.vulnerability_matches:
+        match = crash.vulnerability_matches[0]
+        suffix = f" ({match.cwe})" if match.cwe else ""
+        lines.append(f"  match: {match.title}{suffix}")
+    if crash.exploitability_notes:
+        lines.append(f"  notes: {_shorten(crash.exploitability_notes, 180)}")
+    return lines
+
+
+def _summary_crashes(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    crashes = summary.get("crashes")
+    if not isinstance(crashes, list):
+        return []
+    return [crash for crash in crashes if isinstance(crash, dict)]
+
+
+def _campaign_result_sentence(
+    cid: str,
+    status: str,
+    has_crashes: bool,
+    crash_count: int,
+) -> str:
+    if has_crashes:
+        suffix = "。这里的 `failed` 通常表示目标程序因 crash 退出，不代表 harness 构建失败。" if status == "failed" else "。"
+        return f"本次 fuzz 已结束，并发现 {crash_count} 个 crash{suffix}"
+    if status == "failed":
+        return (
+            "本次 fuzz 未正常完成，且没有记录到 crash。"
+            "这更可能是引擎错误、运行环境问题、超时或构建产物异常。"
+        )
+    if status in {"stopped", "finished"}:
+        return "本次 fuzz 已完成，暂未发现 crash。"
+    return f"Campaign `{cid}` 当前状态为 `{status}`，暂未发现 crash。"
+
+
+def _campaign_overview_lines(cid: str, stats: dict[str, Any]) -> list[str]:
+    lines = [
+        f"- campaign: `{cid}`",
+        f"- status: `{stats.get('status', 'unknown')}`",
+        f"- elapsed: {_int_value(stats.get('elapsed_sec'))}s",
+        f"- unique crashes: {_int_value(stats.get('unique_crashes'))}",
+    ]
+    optional_metrics = (
+        ("execs total", "execs_total"),
+        ("execs/sec", "execs_per_sec"),
+        ("edges covered", "edges_covered"),
+        ("corpus size", "corpus_size"),
+    )
+    for label, key in optional_metrics:
+        if key in stats and stats.get(key) is not None:
+            lines.append(f"- {label}: {stats.get(key)}")
+    return lines
+
+
+def _format_crash_summary(crashes: list[dict[str, Any]], paths: dict[str, Any]) -> list[str]:
+    lines = [f"发现 {len(crashes)} 个 crash。"]
+    for idx, crash in enumerate(crashes[:5], start=1):
+        crash_id = str(crash.get("crash_id") or "unknown")
+        status = str(crash.get("status") or "unknown")
+        kind = str(crash.get("sanitizer_kind") or "unknown")
+        input_path = str(crash.get("input_path") or "")
+        minimized_path = str(crash.get("minimized_path") or "")
+        reproduce_log = str(crash.get("reproduce_log_path") or "")
+        lines.append(f"{idx}. `{crash_id}` status={status} kind={kind}")
+        if input_path:
+            lines.append(f"  input: `{input_path}`")
+            preview = _input_preview(Path(input_path))
+            if preview:
+                lines.append(f"  input preview: `{preview}`")
+        if minimized_path:
+            lines.append(f"  minimized: `{minimized_path}`")
+        if reproduce_log:
+            lines.append(f"  reproduce log: `{reproduce_log}`")
+        frame = _first_frame(crash)
+        if frame:
+            lines.append(f"  top frame: {frame}")
+        matches = _vulnerability_matches(crash)
+        if matches:
+            lines.append(f"  match: {matches[0]}")
+    if len(crashes) > 5:
+        lines.append(f"- 还有 {len(crashes) - 5} 个 crash 未展示")
+    crash_dir = str(paths.get("crash_dir") or "")
+    if crash_dir:
+        lines.append(f"crash dir: `{crash_dir}`")
+    return lines
+
+
+def _artifact_lines(paths: dict[str, Any]) -> list[str]:
+    labels = (
+        ("agent trace", "agent_trace"),
+        ("run log", "run_log"),
+        ("build log", "build_log"),
+        ("harness", "harness"),
+        ("coverage summary", "coverage_summary"),
+        ("coverage uncovered", "coverage_uncovered"),
+        ("crash dir", "crash_dir"),
+    )
+    lines = [
+        f"- {label}: `{paths[key]}`"
+        for label, key in labels
+        if paths.get(key)
+    ]
+    return lines or ["- 当前 summary 未提供 artifact 路径。"]
+
+
+def _next_step_lines(cid: str, status: str, has_crashes: bool) -> list[str]:
+    if has_crashes:
+        return [
+            f"- 输入 `triage {cid}` 查看或刷新 crash 分诊结果。",
+            f"- 打开 `/campaigns/{cid}` 查看 run log、harness、crash artifact 和 agent trace。",
+        ]
+    if status == "failed":
+        return [
+            "- 优先查看 run log 和 agent trace，确认是引擎错误、环境问题还是目标程序异常退出。",
+            f"- 打开 `/campaigns/{cid}` 查看完整 artifact。",
+        ]
+    return [
+        "- 可以延长运行时间继续探索，或查看 coverage 结果寻找未覆盖路径。",
+        f"- 打开 `/campaigns/{cid}` 查看完整 artifact。",
+    ]
+
+
+def _int_value(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(float(value))
+        except ValueError:
+            return 0
+    return 0
+
+
+def _input_preview(path: Path, limit: int = 32) -> str:
+    try:
+        data = path.read_bytes()[:limit]
+    except OSError:
+        return ""
+    if not data:
+        return "<empty>"
+    text = data.decode("utf-8", errors="replace")
+    if all(ch.isprintable() and ch not in "\r\n\t" for ch in text):
+        return text
+    return data.hex()
+
+
+def _first_frame(crash: dict[str, Any]) -> str:
+    frames = crash.get("top_frames")
+    if isinstance(frames, list) and frames:
+        return str(frames[0])
+    return ""
+
+
+def _vulnerability_matches(crash: dict[str, Any]) -> list[str]:
+    raw = crash.get("vulnerability_matches")
+    if not isinstance(raw, list):
+        return []
+    out: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title")
+        cwe = item.get("cwe")
+        if isinstance(title, str) and title:
+            out.append(f"{title}" + (f" ({cwe})" if isinstance(cwe, str) and cwe else ""))
+    return out
 
 
 def _shorten(text: str, limit: int) -> str:

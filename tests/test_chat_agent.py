@@ -1,11 +1,18 @@
 import asyncio
+from datetime import datetime, timezone
 
 from click.testing import CliRunner
 
 from fuzz_agent.chat import ChatSession, ConversationAgent
 from fuzz_agent.cli import main
 from fuzz_agent.events.stream import EventBus
-from fuzz_agent.state.models import BuildArtifact, CampaignConfig, EngineKind
+from fuzz_agent.state.models import (
+    BuildArtifact,
+    CampaignConfig,
+    CrashRecord,
+    CrashStatus,
+    EngineKind,
+)
 from fuzz_agent.state.store import CampaignStore
 from fuzz_agent.tools import _runtime
 from fuzz_agent.tools._runtime import Runtime
@@ -98,7 +105,10 @@ def test_chat_run_parses_chinese_freeform_without_spaces(tmp_path, monkeypatch):
 
     reply = asyncio.run(agent.respond(session, "对demo_targets/real_target_crash进行fuzz测试一分钟"))
 
-    assert "campaign `cid123`" in reply
+    assert "结果" in reply
+    assert "概览" in reply
+    assert "- campaign: `cid123`" in reply
+    assert "本次 fuzz 已完成，暂未发现 crash。" in reply
     assert len(captured_goals) == 1
     assert captured_goals[0].target_path == target.resolve()
     assert captured_goals[0].time_budget_sec == 60
@@ -129,10 +139,63 @@ def test_chat_run_reuses_target_for_chinese_duration(tmp_path, monkeypatch):
 
     reply = asyncio.run(agent.respond(session, "跑半分钟"))
 
-    assert "campaign `cid456`" in reply
+    assert "结果" in reply
+    assert "概览" in reply
+    assert "- campaign: `cid456`" in reply
+    assert "本次 fuzz 已完成，暂未发现 crash。" in reply
     assert len(captured_goals) == 1
     assert captured_goals[0].target_path == tmp_path.resolve()
     assert captured_goals[0].time_budget_sec == 30
+
+
+def test_chat_run_summary_includes_crash_details(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    crash_input = tmp_path / "state" / "campaigns" / "cid789" / "crashes" / "crash-abc"
+    crash_input.parent.mkdir(parents=True)
+    crash_input.write_bytes(b"BUG!")
+    reproduce_log = crash_input.with_suffix(".log")
+    reproduce_log.write_text("SUMMARY: AddressSanitizer: SEGV parser.cc:10\n", encoding="utf-8")
+
+    async def fake_run(self, goal):
+        return {
+            "campaign_id": "cid789",
+            "stats": {
+                "status": "failed",
+                "elapsed_sec": 0,
+                "unique_crashes": 1,
+            },
+            "crashes": [
+                {
+                    "crash_id": "abc",
+                    "status": "confirmed",
+                    "sanitizer_kind": "SEGV",
+                    "input_path": str(crash_input),
+                    "minimized_path": None,
+                    "reproduce_log_path": str(reproduce_log),
+                    "top_frames": ["ParseThing parser.cc:10"],
+                    "vulnerability_matches": [
+                        {"title": "Null pointer dereference", "cwe": "CWE-476"},
+                    ],
+                },
+            ],
+            "paths": {
+                "agent_trace": str(tmp_path / "trace.jsonl"),
+                "crash_dir": str(crash_input.parent),
+            },
+        }
+
+    monkeypatch.setattr("fuzz_agent.chat.agent.Orchestrator.run", fake_run)
+    session = ChatSession(target_path=str(tmp_path))
+    agent = ConversationAgent(CampaignStore(tmp_path), EventBus())
+
+    reply = asyncio.run(agent.respond(session, "run 1s"))
+
+    assert "发现 1 个 crash" in reply
+    assert "`abc`" in reply
+    assert "input preview: `BUG!`" in reply
+    assert "reproduce log:" in reply
+    assert "ParseThing parser.cc:10" in reply
+    assert "Null pointer dereference (CWE-476)" in reply
 
 
 def test_chat_llm_intent_can_parse_freeform_analyze(tmp_path, monkeypatch):
@@ -181,6 +244,37 @@ def test_chat_trace_summarizes_agent_trace(tmp_path, monkeypatch):
     assert "harness_attempt" in reply
     assert "regenerate_harness" in reply
     assert "missing include" in reply
+
+
+def test_chat_triage_includes_crash_artifacts(tmp_path, monkeypatch):
+    crash_input = tmp_path / "crashes" / "crash-abc"
+    crash_input.parent.mkdir()
+    crash_input.write_bytes(b"BUG!")
+    reproduce_log = crash_input.with_suffix(".log")
+    reproduce_log.write_text("SUMMARY: AddressSanitizer: SEGV parser.cc:10\n", encoding="utf-8")
+    crash = CrashRecord(
+        crash_id="abc",
+        campaign_id="cid789",
+        input_path=crash_input,
+        minimized_path=None,
+        stack_hash="abc",
+        top_frames=["ParseThing parser.cc:10"],
+        sanitizer_kind="SEGV",
+        discovered_at=datetime.now(timezone.utc),
+        status=CrashStatus.CONFIRMED,
+        reproducible=True,
+        reproduce_log_path=reproduce_log,
+    )
+    monkeypatch.setattr("fuzz_agent.chat.agent.tools.triage_crashes", lambda *_args, **_kwargs: [crash])
+    session = ChatSession(active_campaign_id="cid789")
+    agent = ConversationAgent(CampaignStore(tmp_path), EventBus())
+
+    reply = asyncio.run(agent.respond(session, "triage"))
+
+    assert "campaign `cid789` crash 分诊结果" in reply
+    assert "input preview: `BUG!`" in reply
+    assert "reproduce log:" in reply
+    assert "ParseThing parser.cc:10" in reply
 
 
 def test_chat_stop_calls_tool_for_active_campaign(tmp_path, monkeypatch):
