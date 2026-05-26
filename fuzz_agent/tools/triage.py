@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from ..agent_harness.observation import (
     AgentObservation,
@@ -10,7 +11,7 @@ from ..agent_harness.observation import (
     agent_observation_to_dict,
 )
 from ..agent_harness.validators import validate_crash_not_from_harness
-from ..state.models import CrashRecord, CrashStatus
+from ..state.models import BuildArtifact, CrashRecord, CrashStatus
 from ..state.store import CampaignStore
 from ..subagents import crash_triage, vulnerability_matcher
 from ._runtime import runtime
@@ -33,15 +34,11 @@ def triage_crashes_impl(campaign_id: str, top_n: int) -> list[CrashRecord]:
     out: list[CrashRecord] = []
     for crash in crashes:
         log_path = crash.input_path.with_suffix(crash.input_path.suffix + ".log")
-        try:
-            report = eng.reproduce(cfg.artifact, crash.input_path)
-        except Exception as e:  # noqa: BLE001
-            report = f"reproduce_failed: {e}"
-            confirmed = None
-            status = CrashStatus.FLAKY
-        else:
-            confirmed = report is not None
-            status = CrashStatus.CONFIRMED if confirmed else CrashStatus.NON_REPRODUCIBLE
+        report, confirmed, status, reproduce_attempts = _reproduce_with_retries(
+            eng,
+            cfg.artifact,
+            crash.input_path,
+        )
 
         if report and not log_path.exists():
             log_path.write_text(report, encoding="utf-8")
@@ -59,6 +56,7 @@ def triage_crashes_impl(campaign_id: str, top_n: int) -> list[CrashRecord]:
             updated,
             report,
             cfg.artifact.harness_source_path,
+            reproduce_attempts,
         )
         out.append(updated)
     return out
@@ -86,6 +84,7 @@ def _record_crash_reproduce_observation(
     crash: CrashRecord,
     report: str | None,
     harness_source_path: Path | None,
+    reproduce_attempts: list[dict[str, object]] | None = None,
 ) -> None:
     repro_passed = crash.reproducible is True
     validations = [
@@ -120,6 +119,7 @@ def _record_crash_reproduce_observation(
             "sanitizer_kind": crash.sanitizer_kind,
             "top_frames": crash.top_frames[:5],
             "vulnerability_matches": crash.vulnerability_matches,
+            "reproduce_attempts": reproduce_attempts or [],
         },
     )
     store.record_agent_trace(campaign_id, {
@@ -137,3 +137,35 @@ def _record_crash_reproduce_observation(
         },
         "score": observation.score,
     })
+
+
+def _reproduce_with_retries(
+    engine: Any,
+    artifact: BuildArtifact,
+    input_path: Path,
+    attempts: int = 3,
+) -> tuple[str | None, bool | None, CrashStatus, list[dict[str, object]]]:
+    attempt_records: list[dict[str, object]] = []
+    saw_error = False
+    for idx in range(1, attempts + 1):
+        try:
+            report = engine.reproduce(artifact, input_path)
+        except Exception as exc:  # noqa: BLE001
+            saw_error = True
+            attempt_records.append({
+                "attempt": idx,
+                "status": "error",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+            continue
+        if report is not None:
+            attempt_records.append({
+                "attempt": idx,
+                "status": "confirmed",
+                "report_len": len(report),
+            })
+            return report, True, CrashStatus.CONFIRMED, attempt_records
+        attempt_records.append({"attempt": idx, "status": "non_reproducible"})
+    if saw_error:
+        return "reproduce_failed_or_flaky", None, CrashStatus.FLAKY, attempt_records
+    return None, False, CrashStatus.NON_REPRODUCIBLE, attempt_records
