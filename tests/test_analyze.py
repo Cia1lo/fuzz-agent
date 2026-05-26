@@ -30,6 +30,28 @@ def test_analyze_python_target_detects_entry_point(tmp_path):
     assert "parse_json" in profile.entry_points
 
 
+def test_analyze_cpp_detects_lowercase_and_byte_signature_entries(tmp_path):
+    (tmp_path / "CMakeLists.txt").write_text("project(demo)\n", encoding="utf-8")
+    (tmp_path / "parser.cc").write_text(
+        "int parse_frame(const uint8_t *data, size_t size) { return 0; }\n"
+        "int HandleBytes(const unsigned char *data, size_t size) { return 0; }\n",
+        encoding="utf-8",
+    )
+    build = tmp_path / "build"
+    build.mkdir()
+    (build / "generated.cc").write_text(
+        "int DecodeGenerated(const unsigned char *data, size_t size) { return 0; }\n",
+        encoding="utf-8",
+    )
+
+    profile = analyze_target(str(tmp_path))
+
+    assert profile.language is Language.CPP
+    assert "parse_frame" in profile.entry_points
+    assert "HandleBytes" in profile.entry_points
+    assert "DecodeGenerated" not in profile.entry_points
+
+
 def test_analyze_empty_dir_unknown_with_no_entries(tmp_path):
     profile = analyze_target(str(tmp_path))
 
