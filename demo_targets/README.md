@@ -20,4 +20,5 @@ Demo intent:
   that fails at startup.
 - `harness_owned_crash`: useful for showing harness-owned crash classification.
 - `real_target_crash`: contains a real target-owned null dereference on `BUG!`.
-
+- `cwe_oob_write`: contains a real target-owned heap out-of-bounds write that
+  should be classified as `CWE-787`.
