@@ -6,7 +6,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from .observation import AgentObservation, HarnessAttemptObservation
+from .observation import (
+    AgentObservation,
+    HarnessAttemptObservation,
+    agent_observation_to_dict,
+    observation_is_accepted,
+    observation_score_dict,
+    observation_source_path,
+)
 
 
 class HarnessAction(str, Enum):
@@ -31,12 +38,12 @@ class HarnessPolicy:
 
     def decide(
         self,
-        observation: HarnessAttemptObservation,
+        observation: AgentObservation | HarnessAttemptObservation,
         *,
         attempt: int,
         max_attempts: int,
     ) -> HarnessDecision:
-        if observation.is_accepted:
+        if observation_is_accepted(observation):
             return HarnessDecision(
                 action=HarnessAction.ACCEPT_HARNESS,
                 reason="all validations passed",
@@ -86,12 +93,12 @@ Do not include prose or markdown."""
 
     def decide(
         self,
-        observation: HarnessAttemptObservation,
+        observation: AgentObservation | HarnessAttemptObservation,
         *,
         attempt: int,
         max_attempts: int,
     ) -> HarnessDecision:
-        if observation.is_accepted:
+        if observation_is_accepted(observation):
             return HarnessDecision(
                 action=HarnessAction.ACCEPT_HARNESS,
                 reason="all validations passed",
@@ -120,7 +127,7 @@ Do not include prose or markdown."""
 
 def _parse_llm_decision(
     raw: Any,
-    observation: HarnessAttemptObservation | None = None,
+    observation: AgentObservation | HarnessAttemptObservation | None = None,
 ) -> HarnessDecision:
     if not isinstance(raw, dict):
         raise ValueError("policy output must be an object")
@@ -144,7 +151,7 @@ def _parse_llm_decision(
 def _validate_payload(
     action: HarnessAction,
     payload: dict[str, Any],
-    observation: HarnessAttemptObservation | None,
+    observation: AgentObservation | HarnessAttemptObservation | None,
 ) -> dict[str, Any]:
     if action is HarnessAction.PATCH_HARNESS:
         path = payload.get("path")
@@ -153,9 +160,10 @@ def _validate_payload(
             raise ValueError("patch_harness payload requires string path")
         if patch is not None and not isinstance(patch, str):
             raise ValueError("patch_harness payload patch must be a string")
-        if observation and observation.source_path is not None:
+        source_path = observation_source_path(observation)
+        if source_path is not None:
             requested = Path(path).expanduser()
-            allowed = observation.source_path.resolve()
+            allowed = source_path.resolve()
             if requested.resolve() != allowed:
                 raise ValueError("patch_harness path must be the current harness source")
     elif action is HarnessAction.ADD_SEED:
@@ -184,21 +192,25 @@ def _validate_payload(
 
 
 def _observation_prompt(
-    observation: HarnessAttemptObservation,
+    observation: AgentObservation | HarnessAttemptObservation,
     attempt: int,
     max_attempts: int,
 ) -> str:
-    validations = [
-        {"name": v.name, "passed": v.passed, "detail": v.detail}
-        for v in observation.validations
-    ]
-    score = observation.score.__dict__ if observation.score is not None else {}
+    if isinstance(observation, HarnessAttemptObservation):
+        unified = observation.to_agent_observation()
+    else:
+        unified = observation
+    obs = agent_observation_to_dict(unified)
+    validations = obs["validations"]
+    score = observation_score_dict(unified)
+    artifacts = obs["artifacts"]
     return (
         f"Attempt: {attempt}/{max_attempts}\n"
-        f"Entry: {observation.entry}\n"
-        f"Engine: {observation.engine.value}\n"
-        f"Build passed: {observation.build_passed}\n"
-        f"Diagnostics:\n{observation.diagnostics[-4000:]}\n\n"
+        f"Observation kind: {unified.kind}\n"
+        f"Summary: {unified.summary}\n"
+        f"Entry: {artifacts.get('entry', '')}\n"
+        f"Engine: {artifacts.get('engine', '')}\n"
+        f"Diagnostics:\n{unified.diagnostics[-4000:]}\n\n"
         f"Validations: {validations}\n"
         f"Score: {score}\n"
         "Choose the next action."

@@ -80,7 +80,29 @@ def test_orchestrator_persists_failed_agent_trace_before_campaign(tmp_path):
     assert trace[-1]["decision"]["action"] == "stop_failed"
 
 
-def test_orchestrator_records_policy_decision_for_plateau(tmp_path, monkeypatch):
+def test_orchestrator_prefers_byte_oriented_entry_point(tmp_path):
+    (tmp_path / "parser.cc").write_text(
+        "int InitConfig();\n"
+        "int ParseBytes(const unsigned char *data, unsigned long size) { return 0; }\n",
+        encoding="utf-8",
+    )
+    target = TargetProfile(
+        root=tmp_path,
+        language=Language.CPP,
+        entry_points=["InitConfig", "ParseBytes"],
+        build_system="cmake",
+    )
+    orch = Orchestrator(CampaignStore(tmp_path / "state-root"), EventBus())
+
+    entry = orch._select_entry_point(
+        target,
+        CampaignGoal(target_path=tmp_path, time_budget_sec=1),
+    )
+
+    assert entry == "ParseBytes"
+
+
+def test_orchestrator_records_policy_decision_for_plateau(tmp_path, monkeypatch, make_stats):
     store = CampaignStore(tmp_path)
     cfg = CampaignConfig(
         artifact=BuildArtifact(
@@ -95,6 +117,7 @@ def test_orchestrator_records_policy_decision_for_plateau(tmp_path, monkeypatch)
         time_budget_sec=10,
     )
     cid = store.new_campaign(cfg)
+    store.record_stats(make_stats(cid, edges_covered=13))
     calls: list[tuple[str, str]] = []
 
     def fake_mutate(campaign_id: str, hint: str):
@@ -118,3 +141,41 @@ def test_orchestrator_records_policy_decision_for_plateau(tmp_path, monkeypatch)
     assert calls == [(cid, "plateau: explore uncovered branches")]
     assert trace[-1]["phase"] == "coverage_plateau"
     assert trace[-1]["decision"]["action"] == "add_dictionary"
+    assert trace[-1]["observation"]["kind"] == "coverage_plateau"
+    assert trace[-1]["score"]["coverage_delta"] == 0
+    assert trace[-1]["score"]["edges_before"] == 13
+
+
+def test_orchestrator_records_coverage_delta_trace(tmp_path):
+    store = CampaignStore(tmp_path)
+    cfg = CampaignConfig(
+        artifact=BuildArtifact(
+            binary_path=tmp_path / "fuzz",
+            engine=EngineKind.LIBFUZZER,
+            sanitizers=[],
+            build_log_path=tmp_path / "build.log",
+        ),
+        corpus_dir=tmp_path / "corpus",
+        crash_dir=tmp_path / "crashes",
+        dictionary_path=None,
+        time_budget_sec=10,
+    )
+    cid = store.new_campaign(cfg)
+    orch = Orchestrator(store, EventBus())
+    orch._coverage_baselines[cid] = 13
+
+    asyncio.run(orch._on_new_coverage(
+        FuzzEvent(
+            kind=EventKind.NEW_COVERAGE,
+            campaign_id=cid,
+            ts=datetime.now(timezone.utc),
+            payload={"edges": 21},
+        ),
+        CampaignGoal(target_path=tmp_path, time_budget_sec=10),
+    ))
+
+    trace = store.list_agent_trace(cid)
+    assert trace[-1]["phase"] == "coverage_delta"
+    assert trace[-1]["score"]["coverage_delta"] == 8
+    assert trace[-1]["score"]["edges_before"] == 13
+    assert trace[-1]["score"]["edges_after"] == 21

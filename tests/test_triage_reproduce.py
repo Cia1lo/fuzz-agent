@@ -19,6 +19,7 @@ def test_triage_reproduces_and_writes_missing_log(tmp_path, monkeypatch):
             engine=EngineKind.LIBFUZZER,
             sanitizers=[],
             build_log_path=tmp_path / "build.log",
+            harness_source_path=tmp_path / "harness.cc",
         ),
         corpus_dir=tmp_path / "corpus",
         crash_dir=tmp_path / "crashes",
@@ -42,3 +43,7 @@ def test_triage_reproduces_and_writes_missing_log(tmp_path, monkeypatch):
     assert "heap-buffer-overflow" in record.reproduce_log_path.read_text(encoding="utf-8")
     assert record.vulnerability_matches
     assert record.vulnerability_matches[0].cwe in {"CWE-119", "CWE-125", "CWE-787"}
+    trace = rt.store.list_agent_trace(cid)
+    assert trace[-1]["phase"] == "crash_reproduce"
+    assert trace[-1]["observation"]["kind"] == "crash_reproduce"
+    assert trace[-1]["score"]["crash_reproducible"] is True

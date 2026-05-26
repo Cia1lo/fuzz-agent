@@ -20,8 +20,12 @@ from .agent_harness import (
     HarnessAction,
     HarnessBuildError,
     ValidationResult,
+    agent_observation_to_dict,
 )
-from .agent_harness.validators import validate_crash_not_from_harness
+from .agent_harness.validators import (
+    validate_crash_not_from_harness,
+    validate_target_reached_by_artifact,
+)
 from .engines.base import FuzzEngine
 from .events.stream import EventBus, PlateauDetector
 from .hitl import AlwaysAllow, HITL
@@ -63,6 +67,7 @@ class Orchestrator:
         self._engine: FuzzEngine | None = None
         self._harness_result: AgentHarnessResult | None = None
         self._coverage_policy = CoverageStrategyPolicy()
+        self._coverage_baselines: dict[str, int] = {}
 
     async def run(self, goal: CampaignGoal) -> dict[str, Any]:
         target = await self._analyze(goal.target_path)
@@ -128,8 +133,58 @@ class Orchestrator:
         return tools.analyze_target(str(path))
 
     async def _make_harness(self, target: TargetProfile, goal: CampaignGoal) -> HarnessSpec:
-        entry = target.entry_points[0]  # first heuristic; LLM could re-rank
+        entry = self._select_entry_point(target, goal)
         return self._generate_harness(target, entry, goal, attempt=1, diagnostics=None)
+
+    def _select_entry_point(self, target: TargetProfile, goal: CampaignGoal) -> str:
+        if not target.entry_points:
+            raise RuntimeError(f"No fuzz entry points detected under {target.root}")
+        ranked = [
+            (self._entry_point_score(target, entry, goal.engine), index, entry)
+            for index, entry in enumerate(target.entry_points)
+        ]
+        ranked.sort(key=lambda item: (-item[0], item[1]))
+        return ranked[0][2]
+
+    @staticmethod
+    def _entry_point_score(target: TargetProfile, entry: str, engine: EngineKind) -> int:
+        score = 0
+        lower = entry.lower()
+        if any(word in lower for word in ("parse", "decode", "deserialize", "unmarshal")):
+            score += 4
+        if any(word in lower for word in ("bytes", "buffer", "data", "input", "from_bytes")):
+            score += 3
+        try:
+            from .subagents.harness_context import pack_context
+
+            context = pack_context(target, entry, engine)
+        except Exception:
+            return score
+        signature = str(context.get("signature") or "").lower()
+        source_file = str(context.get("source_file") or "")
+        if source_file:
+            score += 10
+        if any(
+            marker in signature
+            for marker in (
+                "char *",
+                "char*",
+                "uint8_t",
+                "unsigned char",
+                "std::string",
+                "string_view",
+                "&[u8]",
+                "vec<u8>",
+                "bytes",
+                "slice",
+            )
+        ):
+            score += 8
+        if context.get("sample_inputs"):
+            score += 1
+        if context.get("compile_flags") or context.get("link_flags"):
+            score += 1
+        return score
 
     def _generate_harness(
         self,
@@ -268,12 +323,12 @@ class Orchestrator:
         spec: HarnessSpec,
         artifact: BuildArtifact,
     ) -> ValidationResult:
-        del artifact
-        from .agent_harness.validators import validate_target_referenced_by_harness
-
-        return validate_target_referenced_by_harness(spec)
+        return validate_target_reached_by_artifact(spec, artifact)
 
     def _stats(self, cid: str) -> CampaignStats:
+        stored = self.store.latest_stats(cid)
+        if stored is not None:
+            return stored
         return tools.query_status(cid)
 
     async def _stop(self, cid: str) -> None:
@@ -348,10 +403,47 @@ class Orchestrator:
             tools.triage_crashes(ev.campaign_id, top_n=goal.max_unique_crashes)
 
     async def _on_new_coverage(self, ev: FuzzEvent, goal: CampaignGoal) -> None:
-        return
+        del goal
+        baseline = self._coverage_baselines.get(ev.campaign_id)
+        if baseline is None:
+            return
+        edges_after = _event_edges(ev)
+        if edges_after is None:
+            edges_after = self._stats(ev.campaign_id).edges_covered
+        delta = edges_after - baseline
+        observation = AgentObservation(
+            kind="coverage_delta",
+            summary=f"coverage changed by {delta} edges after strategy mutation",
+            diagnostics=str(ev.payload),
+            artifacts={
+                "coverage_uncovered": self.store.paths(ev.campaign_id)["coverage_uncovered"],
+                "coverage_summary": self.store.paths(ev.campaign_id)["coverage_summary"],
+            },
+            score={
+                "coverage_delta": delta,
+                "edges_before": baseline,
+                "edges_after": edges_after,
+            },
+            raw={"event": ev},
+        )
+        self.store.record_agent_trace(ev.campaign_id, {
+            "phase": "coverage_delta",
+            "observation": agent_observation_to_dict(observation),
+            "decision": {
+                "action": "measure_coverage_delta",
+                "reason": "new coverage arrived after strategy mutation",
+            },
+            "action": {"tool_chain": []},
+            "result": {"edges_before": baseline, "edges_after": edges_after},
+            "score": observation.score,
+        })
+        if delta > 0:
+            self._coverage_baselines.pop(ev.campaign_id, None)
 
     async def _on_plateau(self, ev: FuzzEvent, goal: CampaignGoal) -> None:
         self._plateau_hits += 1
+        stats = self._stats(ev.campaign_id)
+        edges_before = stats.edges_covered
         observation = AgentObservation(
             kind="coverage_plateau",
             summary="plateau: explore uncovered branches",
@@ -369,13 +461,30 @@ class Orchestrator:
                 ev.campaign_id,
                 hint=str(decision.payload.get("hint") or observation.summary),
             )
+        score = {
+            "coverage_delta": 0,
+            "edges_before": edges_before,
+            "edges_after": edges_before,
+            "added_seed_count": len(strategy.get("added_seeds", []) or []),
+            "dict_addition_count": len(strategy.get("dict_additions", []) or []),
+            "target_reached": None,
+        }
+        observation = AgentObservation(
+            kind=observation.kind,
+            summary=observation.summary,
+            diagnostics=observation.diagnostics,
+            artifacts=observation.artifacts,
+            validations=observation.validations,
+            score=score,
+            raw=observation.raw,
+        )
         self.store.record_agent_trace(ev.campaign_id, {
             "phase": "coverage_plateau",
-            "observation": observation,
+            "observation": agent_observation_to_dict(observation),
             "decision": decision,
             "action": {"tool_chain": ["mutate_strategy"] if strategy else []},
             "result": strategy,
-            "score": {},
+            "score": score,
         })
         if self._plateau_hits > goal.max_plateau_restarts:
             return
@@ -385,7 +494,6 @@ class Orchestrator:
         })
         if not allowed:
             return
-        stats = self._stats(ev.campaign_id)
         remaining = max(60, goal.time_budget_sec - stats.elapsed_sec)
         tools.stop_campaign(ev.campaign_id)
         if self._artifact is None:
@@ -399,6 +507,7 @@ class Orchestrator:
         )
         if self._harness_result is not None:
             self._persist_agent_trace(new_cid, self._harness_result)
+        self._coverage_baselines[new_cid] = edges_before
         self._active_cid = new_cid
         self.plateau = PlateauDetector(idle_sec=goal.coverage_plateau_sec)
         self.plateau.reset()
@@ -427,3 +536,8 @@ def _read_crash_report(path: Path | None) -> str | None:
         return path.read_text(errors="replace")
     except OSError:
         return None
+
+
+def _event_edges(ev: FuzzEvent) -> int | None:
+    value = ev.payload.get("edges")
+    return value if isinstance(value, int) else None

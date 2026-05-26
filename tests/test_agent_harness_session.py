@@ -16,6 +16,7 @@ from fuzz_agent.agent_harness import (
 )
 from fuzz_agent.agent_harness.validators import (
     validate_crash_not_from_harness,
+    validate_target_reached_by_artifact,
     validate_target_referenced_by_harness,
 )
 from fuzz_agent.state.models import (
@@ -98,6 +99,8 @@ def test_agent_harness_session_retries_with_build_diagnostics(tmp_path):
     assert [a.attempt for a in result.attempts] == [1, 2]
     assert "compile failed" in diagnostics_seen[1]
     assert "attempt 1 build log" in diagnostics_seen[1]
+    assert result.trace_records[0].observation["kind"] == "harness_build_failure"
+    assert result.trace_records[1].observation["kind"] == "harness_accepted"
     assert result.trace_records[0].decision["action"] is HarnessAction.REGENERATE_HARNESS
     assert result.trace_records[1].decision["action"] is HarnessAction.ACCEPT_HARNESS
 
@@ -188,6 +191,7 @@ def test_agent_harness_session_uses_smoke_run_validation(tmp_path):
         None,
         True,
     ]
+    assert result.trace_records[0].observation["kind"] == "harness_smoke_failure"
     assert result.trace_records[0].decision["action"] is HarnessAction.REGENERATE_HARNESS
     assert result.trace_records[1].decision["action"] is HarnessAction.ACCEPT_HARNESS
 
@@ -200,6 +204,62 @@ def test_target_referenced_validator_rejects_harness_that_never_calls_entry(tmp_
     result = validate_target_referenced_by_harness(spec)
 
     assert not result.passed
+
+
+def test_target_reached_artifact_validator_uses_symbol_evidence(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    spec = _spec(target, 1)
+    binary = tmp_path / "fuzz"
+    binary.write_text("binary", encoding="utf-8")
+    artifact = BuildArtifact(
+        binary_path=binary,
+        engine=EngineKind.LIBFUZZER,
+        sanitizers=[],
+        build_log_path=tmp_path / "build.log",
+        harness_source_path=spec.source_path,
+    )
+
+    class Result:
+        returncode = 0
+        stdout = "00000000 T OtherEntry\n"
+
+    monkeypatch.setattr("fuzz_agent.agent_harness.validators.shutil.which", lambda name: "/usr/bin/nm")
+    monkeypatch.setattr("fuzz_agent.agent_harness.validators.subprocess.run", lambda *args, **kwargs: Result())
+
+    result = validate_target_reached_by_artifact(spec, artifact)
+
+    assert not result.passed
+    assert "does not expose target symbol" in result.detail
+
+
+def test_target_reached_artifact_validator_accepts_runtime_coverage(monkeypatch, tmp_path):
+    target = _target(tmp_path)
+    spec = _spec(target, 1)
+    binary = tmp_path / "fuzz"
+    binary.write_text("binary", encoding="utf-8")
+    artifact = BuildArtifact(
+        binary_path=binary,
+        engine=EngineKind.LIBFUZZER,
+        sanitizers=[],
+        build_log_path=tmp_path / "build.log",
+        harness_source_path=spec.source_path,
+    )
+
+    class Result:
+        returncode = 0
+        stdout = "COVERED_FUNC: ParseThing\n"
+        stderr = ""
+
+    monkeypatch.setattr("fuzz_agent.agent_harness.validators.os.access", lambda *args: True)
+    monkeypatch.setattr(
+        "fuzz_agent.agent_harness.validators.subprocess.run",
+        lambda *args, **kwargs: Result(),
+    )
+
+    result = validate_target_reached_by_artifact(spec, artifact)
+
+    assert result.passed
+    assert "runtime coverage" in result.detail
 
 
 def test_validate_crash_not_from_harness_flags_harness_top_frame(tmp_path):

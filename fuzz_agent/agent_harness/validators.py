@@ -1,10 +1,13 @@
 """Validation helpers for separating agent/harness failures from target findings."""
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
-from ..state.models import BuildArtifact, CrashRecord, HarnessSpec
+from ..state.models import BuildArtifact, CrashRecord, EngineKind, HarnessSpec
 from .observation import AgentStepScore, ValidationResult
 
 
@@ -82,12 +85,88 @@ def validate_target_referenced_by_harness(spec: HarnessSpec) -> ValidationResult
     )
 
 
+def validate_target_reached_by_artifact(
+    spec: HarnessSpec,
+    artifact: BuildArtifact,
+) -> ValidationResult:
+    """Check source reachability and, when possible, linked binary symbol evidence."""
+    source_check = validate_target_referenced_by_harness(spec)
+    if not source_check.passed:
+        return source_check
+
+    runtime_check = _entry_runtime_coverage_evidence(spec.entry, artifact)
+    if runtime_check:
+        return ValidationResult(
+            "target_reached",
+            True,
+            source_check.detail + "; runtime coverage output mentions target entry",
+        )
+
+    symbol_check = _entry_symbol_evidence(spec.entry, artifact.binary_path)
+    if symbol_check is None:
+        return ValidationResult(
+            "target_reached",
+            True,
+            source_check.detail + "; binary symbol evidence unavailable",
+        )
+    if symbol_check:
+        return ValidationResult(
+            "target_reached",
+            True,
+            source_check.detail + "; linked artifact contains target symbol",
+        )
+    return ValidationResult(
+        "target_reached",
+        False,
+        source_check.detail + "; linked artifact does not expose target symbol",
+    )
+
+
 def validate_target_reached_from_frames(entry: str, frames: list[str]) -> ValidationResult:
     """Check stack/symbol frames for the expected target entry."""
     for frame in frames:
         if entry in frame:
             return ValidationResult("target_reached", True, f"matched frame: {frame}")
     return ValidationResult("target_reached", False, f"entry {entry} not found in frames")
+
+
+def _entry_symbol_evidence(entry: str, binary_path: Path) -> bool | None:
+    nm = shutil.which("nm")
+    if nm is None or not binary_path.exists() or not binary_path.is_file():
+        return None
+    try:
+        result = subprocess.run(
+            [nm, "-C", str(binary_path)],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return bool(re.search(rf"\b{re.escape(entry)}\b", result.stdout))
+
+
+def _entry_runtime_coverage_evidence(entry: str, artifact: BuildArtifact) -> bool | None:
+    if artifact.engine is not EngineKind.LIBFUZZER:
+        return None
+    binary_path = artifact.binary_path
+    if not binary_path.exists() or not os.access(binary_path, os.X_OK):
+        return None
+    try:
+        result = subprocess.run(
+            [str(binary_path), "-runs=1", "-print_coverage=1"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    output = (result.stdout or "") + "\n" + (result.stderr or "")
+    if entry in output and ("COVERED" in output or "INITED" in output):
+        return True
+    return None
 
 
 def validate_crash_not_from_harness(

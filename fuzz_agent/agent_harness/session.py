@@ -6,7 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..state.models import BuildArtifact, EngineKind, HarnessSpec, TargetProfile
-from .observation import HarnessAttemptObservation, ValidationResult
+from .observation import (
+    AgentObservation,
+    HarnessAttemptObservation,
+    ValidationResult,
+    agent_observation_to_dict,
+    observation_score_dict,
+)
 from .policy import HarnessAction, HarnessDecision, HarnessPolicy
 from .trace import AgentTraceRecord, AgentTraceRecorder
 from .validators import (
@@ -89,12 +95,18 @@ class AgentHarnessSession:
             except Exception as exc:
                 diagnostics = self._build_diagnostics(spec, exc)
                 observation = self._record_failed_attempt(spec, attempt, diagnostics, exc)
+                agent_observation = observation.to_agent_observation()
                 decision = self.policy.decide(
-                    observation,
+                    agent_observation,
                     attempt=attempt,
                     max_attempts=self.max_attempts,
                 )
-                self._record_trace(observation, decision=decision, artifact=None)
+                self._record_trace(
+                    observation,
+                    agent_observation=agent_observation,
+                    decision=decision,
+                    artifact=None,
+                )
                 if decision.action is HarnessAction.STOP_FAILED:
                     raise HarnessBuildError(
                         f"harness build failed after {attempt} attempts",
@@ -119,12 +131,18 @@ class AgentHarnessSession:
                 diagnostics,
                 validations,
             )
+            agent_observation = observation.to_agent_observation()
             decision = self.policy.decide(
-                observation,
+                agent_observation,
                 attempt=attempt,
                 max_attempts=self.max_attempts,
             )
-            self._record_trace(observation, decision=decision, artifact=artifact)
+            self._record_trace(
+                observation,
+                agent_observation=agent_observation,
+                decision=decision,
+                artifact=artifact,
+            )
             if decision.action is HarnessAction.ACCEPT_HARNESS:
                 return AgentHarnessResult(
                     spec=spec,
@@ -210,22 +228,23 @@ class AgentHarnessSession:
         self,
         observation: HarnessAttemptObservation,
         *,
+        agent_observation: AgentObservation,
         decision: HarnessDecision,
         artifact: BuildArtifact | None,
     ) -> None:
-        score = observation.score.__dict__ if observation.score is not None else {}
+        score = observation_score_dict(agent_observation)
+        trace_observation = agent_observation_to_dict(agent_observation)
+        trace_observation.update({
+            "attempt": observation.attempt,
+            "entry": observation.entry,
+            "engine": observation.engine,
+            "source_path": observation.source_path,
+            "dictionary_path": observation.dictionary_path,
+            "build_log_path": observation.build_log_path,
+        })
         self.trace.record(
             phase="harness_attempt",
-            observation={
-                "entry": observation.entry,
-                "engine": observation.engine,
-                "attempt": observation.attempt,
-                "source_path": observation.source_path,
-                "dictionary_path": observation.dictionary_path,
-                "build_log_path": observation.build_log_path,
-                "diagnostics": observation.diagnostics,
-                "validations": observation.validations,
-            },
+            observation=trace_observation,
             decision={
                 "action": decision.action,
                 "reason": decision.reason,
