@@ -322,18 +322,19 @@ class CampaignStore:
     def save_crash(self, crash: CrashRecord) -> None:
         self._db.execute(
             "INSERT INTO crashes(crash_id,cid,record_json) VALUES (?,?,?) "
-            "ON CONFLICT(crash_id) DO UPDATE SET record_json=excluded.record_json",
+            "ON CONFLICT(crash_id) DO UPDATE SET "
+            "cid=excluded.cid, record_json=excluded.record_json",
             (crash.crash_id, crash.campaign_id, _dumps(crash)),
         )
         self._db.commit()
 
     def list_crashes(self, cid: str) -> list[CrashRecord]:
-        rows = self._db.execute(
+        direct_rows = self._db.execute(
             "SELECT record_json FROM crashes WHERE cid=?", (cid,)
         ).fetchall()
-        out: list[CrashRecord] = []
         allowed = {f.name for f in fields(CrashRecord)}
-        for (raw,) in rows:
+
+        def decode(raw: str) -> CrashRecord:
             d = json.loads(raw)
             d["input_path"] = Path(d["input_path"])
             if d.get("minimized_path"):
@@ -351,7 +352,25 @@ class CampaignStore:
             ]
             if d.get("discovered_at"):
                 d["discovered_at"] = datetime.fromisoformat(d["discovered_at"])
-            out.append(CrashRecord(**{k: v for k, v in d.items() if k in allowed}))
+            return CrashRecord(**{k: v for k, v in d.items() if k in allowed})
+
+        out: list[CrashRecord] = []
+        seen: set[str] = set()
+        for (raw,) in direct_rows:
+            crash = decode(raw)
+            if crash.campaign_id == cid:
+                out.append(crash)
+                seen.add(crash.crash_id)
+        if direct_rows and len(out) == len(direct_rows):
+            return out
+
+        # Recover rows written by older versions where the index cid could be
+        # stale after an ON CONFLICT update for the same global crash id.
+        for (raw,) in self._db.execute("SELECT record_json FROM crashes").fetchall():
+            crash = decode(raw)
+            if crash.campaign_id == cid and crash.crash_id not in seen:
+                out.append(crash)
+                seen.add(crash.crash_id)
         return out
 
     # ---------- summary ----------

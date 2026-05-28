@@ -1,3 +1,4 @@
+import dataclasses
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -147,6 +148,57 @@ def test_save_crash_and_list_crashes_roundtrip(store_root):
     assert saved.top_frames == ["frame1", "frame2"]
     assert saved.severity is Severity.CRITICAL
     assert saved.vulnerability_matches[0].cwe == "CWE-416"
+
+
+def test_save_crash_updates_campaign_index_on_conflict(store_root):
+    store = CampaignStore(store_root)
+    cid1 = store.new_campaign(_config(store_root / "one", "one"))
+    cid2 = store.new_campaign(_config(store_root / "two", "two"))
+    first = CrashRecord(
+        crash_id="same-crash",
+        campaign_id=cid1,
+        input_path=store.paths(cid1)["crash_dir"] / "input",
+        minimized_path=None,
+        stack_hash="stack",
+        top_frames=["frame"],
+        sanitizer_kind="SEGV",
+        discovered_at=datetime.now(timezone.utc),
+    )
+    second = dataclasses.replace(
+        first,
+        campaign_id=cid2,
+        input_path=store.paths(cid2)["crash_dir"] / "input",
+    )
+
+    store.save_crash(first)
+    store.save_crash(second)
+
+    assert store.list_crashes(cid1) == []
+    [saved] = store.list_crashes(cid2)
+    assert saved.campaign_id == cid2
+
+
+def test_list_crashes_recovers_legacy_stale_campaign_index(store_root):
+    store = CampaignStore(store_root)
+    cid1 = store.new_campaign(_config(store_root / "one", "one"))
+    cid2 = store.new_campaign(_config(store_root / "two", "two"))
+    crash = CrashRecord(
+        crash_id="same-crash",
+        campaign_id=cid2,
+        input_path=store.paths(cid2)["crash_dir"] / "input",
+        minimized_path=None,
+        stack_hash="stack",
+        top_frames=["frame"],
+        sanitizer_kind="SEGV",
+        discovered_at=datetime.now(timezone.utc),
+    )
+    store.save_crash(crash)
+    store._db.execute("UPDATE crashes SET cid=? WHERE crash_id=?", (cid1, crash.crash_id))
+    store._db.commit()
+
+    assert store.list_crashes(cid1) == []
+    [saved] = store.list_crashes(cid2)
+    assert saved.campaign_id == cid2
 
 
 def test_summary_returns_stats_crashes_and_paths(store_root, make_stats):
