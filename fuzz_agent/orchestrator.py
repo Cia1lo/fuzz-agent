@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import subagents, tools
+from . import tools
 from .agent_harness import (
     AgentHarnessResult,
     AgentHarnessSession,
@@ -41,6 +41,7 @@ from .state.models import (
     TargetProfile,
 )
 from .state.store import CampaignStore
+from .subagents.exploit_assessor import run as assess_exploitability
 
 
 @dataclass
@@ -372,7 +373,7 @@ class Orchestrator:
                 artifact.harness_source_path if artifact else None,
                 _read_crash_report(c.reproduce_log_path),
             )
-            assessed = subagents.exploit_assessor(c, goal.target_path)
+            assessed = assess_exploitability(c, goal.target_path)
             if not harness_check.passed:
                 self.store.record_event(FuzzEvent(
                     kind=EventKind.ENGINE_ERROR, campaign_id=cid,

@@ -9,7 +9,7 @@ import base64
 import hashlib
 from typing import Any
 
-from ..subagents import coverage_analyst
+from ..subagents.coverage_analyst import run as coverage_analyst
 from ._runtime import runtime
 
 

@@ -13,7 +13,8 @@ from ..agent_harness.observation import (
 from ..agent_harness.validators import validate_crash_not_from_harness
 from ..state.models import BuildArtifact, CrashRecord, CrashStatus
 from ..state.store import CampaignStore
-from ..subagents import crash_triage, vulnerability_matcher
+from ..subagents.crash_triage import run as crash_triage
+from ..subagents.vulnerability_matcher import run as vulnerability_matcher
 from ._runtime import runtime
 
 

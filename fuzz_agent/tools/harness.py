@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ..state.models import EngineKind, HarnessSpec, TargetProfile
-from ..subagents import harness_writer
+from ..subagents.harness_writer import run as harness_writer
 
 
 def generate_harness_impl(target: TargetProfile, entry: str,

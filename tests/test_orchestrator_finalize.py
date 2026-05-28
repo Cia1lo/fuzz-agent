@@ -1,8 +1,10 @@
 import asyncio
 import dataclasses
+import importlib
 from datetime import datetime, timezone
 
-from fuzz_agent import subagents, tools
+from fuzz_agent import tools
+import fuzz_agent.orchestrator as orchestrator_module
 from fuzz_agent.events.stream import EventBus
 from fuzz_agent.hitl import AlwaysAllow, AlwaysDeny
 from fuzz_agent.orchestrator import CampaignGoal, Orchestrator
@@ -82,7 +84,7 @@ def _patch_finalize_dependencies(monkeypatch, crash):
             exploitability_notes="bad",
         )
 
-    monkeypatch.setattr(subagents, "exploit_assessor", fake_assessor)
+    monkeypatch.setattr(orchestrator_module, "assess_exploitability", fake_assessor)
     monkeypatch.setattr(tools, "triage_crashes", lambda campaign_id, top_n: [crash])
 
 
@@ -108,3 +110,25 @@ def test_finalize_does_not_redact_critical_when_hitl_allows(tmp_path, monkeypatc
     saved = store.list_crashes(cid)[0]
     assert not saved.exploitability_notes.startswith("[REDACTED")
     assert saved.minimized_path == crash.input_path.parent / (crash.input_path.name + ".min")
+
+
+def test_finalize_assessor_survives_submodule_import(tmp_path, monkeypatch):
+    orch, store, cid, crash = _seeded_orchestrator(tmp_path, AlwaysAllow())
+    second_path = crash.input_path.parent / "crash-input-2"
+    second_path.write_bytes(b"crash2")
+    second = dataclasses.replace(
+        crash,
+        crash_id="crash-2",
+        input_path=second_path,
+        stack_hash="stack-2",
+    )
+    store.save_crash(second)
+
+    importlib.import_module("fuzz_agent.subagents.exploit_assessor")
+    monkeypatch.setattr(tools, "triage_crashes", lambda campaign_id, top_n: [crash, second])
+
+    goal = CampaignGoal(target_path=tmp_path, time_budget_sec=10)
+    asyncio.run(orch._finalize(cid, goal))
+
+    saved = store.list_crashes(cid)
+    assert {record.crash_id for record in saved} == {"crash-1", "crash-2"}
