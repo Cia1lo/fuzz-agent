@@ -125,6 +125,10 @@ def test_agent_harness_session_retries_with_build_diagnostics(tmp_path):
     assert "compile failed" in diagnostics_seen[1]
     assert "attempt 1 build log" in diagnostics_seen[1]
     assert result.trace_records[0].observation["kind"] == "harness_build_failure"
+    assert (
+        AgentObservation.from_dict(result.trace_records[0].observation).kind
+        == "harness_build_failure"
+    )
     assert result.trace_records[1].observation["kind"] == "harness_accepted"
     assert result.trace_records[0].decision["action"] is HarnessAction.REGENERATE_HARNESS
     assert result.trace_records[1].decision["action"] is HarnessAction.ACCEPT_HARNESS
@@ -429,6 +433,10 @@ def test_agent_harness_session_uses_smoke_run_validation(tmp_path):
         True,
     ]
     assert result.trace_records[0].observation["kind"] == "harness_smoke_failure"
+    assert (
+        AgentObservation.from_dict(result.trace_records[0].observation).kind
+        == "harness_smoke_failure"
+    )
     assert result.trace_records[0].decision["action"] is HarnessAction.REGENERATE_HARNESS
     assert result.trace_records[1].decision["action"] is HarnessAction.ACCEPT_HARNESS
 

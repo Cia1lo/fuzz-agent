@@ -51,6 +51,7 @@ state/campaigns/<campaign_id>/agent_trace.jsonl
 | LibFuzzer build/run/reproduce/minimize | 已实现 |
 | Rust target 分析与 cargo-fuzz harness 生成 | 已实现 |
 | cargo-fuzz build/run/reproduce/minimize | 已实现 |
+| Python Atheris adapter | 实验性：build/import check、run、reproduce/minimize 基础路径 |
 | campaign run log、build log、coverage summary 持久化 | 已实现 |
 | crash reproduce、confirmed/non-reproducible/flaky 状态 | 已实现 |
 | crash 漏洞类型/CWE 匹配与自定义规则 | 已实现 |
@@ -237,4 +238,5 @@ dedupe、Web artifact endpoints 和 local-only middleware。
 - LibFuzzer 目前只支持 C/C++。
 - cargo-fuzz 目前只支持以具体 Rust package 为根的 crate；纯 workspace root 需要先选择实际 crate 目录。
 - coverage 结构化输出主要覆盖 LibFuzzer 路径；cargo-fuzz coverage 尚未完善。
+- Atheris 当前是实验性 adapter，适合已有 Python harness 的基础 run/reproduce 流程；自动 harness 生成和 coverage 闭环尚未达到 LibFuzzer 路径的成熟度。
 - AFL++、Jazzer、Go native fuzz 尚未接入。

@@ -9,7 +9,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Optional, TextIO
 
 from ..sandbox import NoSandbox, Sandbox
 from ..state.models import (
@@ -32,6 +32,7 @@ _CRASH_HEADER_RE = re.compile(r"==\d+==ERROR: (?P<sanitizer>\w+Sanitizer): (?P<k
 _OOM_RE = re.compile(r"out-of-memory|libFuzzer: out-of-memory", re.IGNORECASE)
 _TIMEOUT_RE = re.compile(r"libFuzzer: timeout", re.IGNORECASE)
 _PY_EXCEPTION_PREFIX = "Uncaught Python exception:"
+_HEARTBEAT_INTERVAL_SEC = 10
 
 
 class AtherisEngine(FuzzEngine):
@@ -42,6 +43,7 @@ class AtherisEngine(FuzzEngine):
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         self._stats: dict[str, CampaignStats] = {}
         self._start_ts: dict[str, datetime] = {}
+        self._last_coverage_ts: dict[str, datetime] = {}
         self._pending_py_crash: set[str] = set()
 
     # ---------- build ----------
@@ -71,11 +73,12 @@ class AtherisEngine(FuzzEngine):
             engine=EngineKind.ATHERIS,
             sanitizers=spec.sanitizers,
             build_log_path=log,
+            harness_source_path=spec.source_path,
         )
 
     # ---------- run ----------
     async def run(self, cfg: CampaignConfig) -> AsyncIterator[FuzzEvent]:
-        cid = uuid.uuid4().hex[:12]
+        cid = cfg.campaign_id or uuid.uuid4().hex[:12]
         self._start_ts[cid] = datetime.now(timezone.utc)
         cmd = [
             sys.executable,
@@ -105,6 +108,9 @@ class AtherisEngine(FuzzEngine):
             )
         cmd = self._sandbox.wrap(cmd, mounts=mounts, memory_mb=cfg.max_memory_mb)
 
+        run_log = cfg.crash_dir.parent / "run.log"
+        run_log.parent.mkdir(parents=True, exist_ok=True)
+        log_tail: list[str] = []
         proc = await asyncio.create_subprocess_exec(
             *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
@@ -112,30 +118,64 @@ class AtherisEngine(FuzzEngine):
         self._stats[cid] = self._empty_stats(cid)
 
         try:
-            assert proc.stdout is not None
-            heartbeat_task = asyncio.create_task(self._heartbeat(cid))
-            try:
-                async for line in proc.stdout:
-                    text = line.decode("utf-8", errors="replace").rstrip()
-                    ev = self._parse_line(cid, text)
-                    if ev is not None:
-                        yield ev
-            finally:
-                heartbeat_task.cancel()
-            rc = await proc.wait()
-            self._stats[cid].status = (
-                CampaignStatus.STOPPED if rc == 0 else CampaignStatus.FAILED
-            )
+            with run_log.open("a", encoding="utf-8") as log:
+                log.write("$ " + " ".join(shlex.quote(c) for c in cmd) + "\n")
+                log.flush()
+                async for ev in self._run_stdout_loop(cid, proc, log, log_tail):
+                    yield ev
+                rc = await proc.wait()
+                self._stats[cid].status = (
+                    CampaignStatus.STOPPED if rc == 0 else CampaignStatus.FAILED
+                )
+                self._refresh_elapsed(cid, datetime.now(timezone.utc))
+                if rc != 0:
+                    yield FuzzEvent(
+                        kind=EventKind.ENGINE_ERROR,
+                        campaign_id=cid,
+                        ts=datetime.now(timezone.utc),
+                        payload={
+                            "returncode": rc,
+                            "run_log": str(run_log),
+                            "tail": "\n".join(log_tail[-40:]),
+                        },
+                    )
         finally:
+            self._last_coverage_ts.pop(cid, None)
             self._pending_py_crash.discard(cid)
             self._procs.pop(cid, None)
 
-    async def _heartbeat(self, cid: str) -> None:
+    async def _run_stdout_loop(
+        self,
+        cid: str,
+        proc: asyncio.subprocess.Process,
+        log: TextIO,
+        log_tail: list[str],
+    ) -> AsyncIterator[FuzzEvent]:
         try:
             while True:
-                await asyncio.sleep(10)
+                assert proc.stdout is not None
+                try:
+                    line = await asyncio.wait_for(
+                        proc.stdout.readline(),
+                        timeout=_HEARTBEAT_INTERVAL_SEC,
+                    )
+                except asyncio.TimeoutError:
+                    yield self._heartbeat_event(cid)
+                    continue
+
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                log.write(text + "\n")
+                log.flush()
+                log_tail.append(text)
+                if len(log_tail) > 200:
+                    del log_tail[:100]
+                ev = self._parse_line(cid, text)
+                if ev is not None:
+                    yield ev
         except asyncio.CancelledError:
-            return
+            raise
 
     async def stop(self, campaign_id: str) -> None:
         proc = self._procs.get(campaign_id)
@@ -152,7 +192,8 @@ class AtherisEngine(FuzzEngine):
     # ---------- parsing ----------
     def _parse_line(self, cid: str, line: str) -> Optional[FuzzEvent]:
         st = self._stats.setdefault(cid, self._empty_stats(cid))
-        st.elapsed_sec = int((datetime.now(timezone.utc) - self._start_ts[cid]).total_seconds())
+        now = datetime.now(timezone.utc)
+        self._refresh_elapsed(cid, now)
 
         if cid in self._pending_py_crash and line.strip():
             self._pending_py_crash.discard(cid)
@@ -160,7 +201,7 @@ class AtherisEngine(FuzzEngine):
             return FuzzEvent(
                 kind=EventKind.NEW_CRASH,
                 campaign_id=cid,
-                ts=datetime.now(timezone.utc),
+                ts=now,
                 payload={"sanitizer": "python", "kind": line.strip()[:200], "raw": line[:500]},
             )
 
@@ -171,7 +212,7 @@ class AtherisEngine(FuzzEngine):
                 return FuzzEvent(
                     kind=EventKind.NEW_CRASH,
                     campaign_id=cid,
-                    ts=datetime.now(timezone.utc),
+                    ts=now,
                     payload={"sanitizer": "python", "kind": suffix[:200], "raw": line[:500]},
                 )
             self._pending_py_crash.add(cid)
@@ -188,32 +229,66 @@ class AtherisEngine(FuzzEngine):
             st.edges_covered = cov
             st.corpus_size = corp
             st.status = CampaignStatus.RUNNING
-            st.last_event_ts = datetime.now(timezone.utc)
+            st.last_event_ts = now
             if cov > prev_cov:
+                self._last_coverage_ts[cid] = now
                 st.last_new_coverage_sec_ago = 0
                 return FuzzEvent(
                     kind=EventKind.NEW_COVERAGE, campaign_id=cid,
-                    ts=datetime.now(timezone.utc),
+                    ts=now,
                     payload={"edges": cov, "delta": cov - prev_cov, "execs": execs},
                 )
+            self._refresh_coverage_idle(cid, now)
             return None
 
         m = _CRASH_HEADER_RE.search(line)
         if m:
             st.unique_crashes += 1
             return FuzzEvent(
-                kind=EventKind.NEW_CRASH, campaign_id=cid, ts=datetime.now(timezone.utc),
+                kind=EventKind.NEW_CRASH, campaign_id=cid, ts=now,
                 payload={"sanitizer": m.group("sanitizer"), "kind": m.group("kind"),
                          "raw": line[:500]},
             )
 
         if _OOM_RE.search(line):
             return FuzzEvent(kind=EventKind.OOM, campaign_id=cid,
-                             ts=datetime.now(timezone.utc), payload={"raw": line[:500]})
+                             ts=now, payload={"raw": line[:500]})
         if _TIMEOUT_RE.search(line):
             return FuzzEvent(kind=EventKind.TIMEOUT, campaign_id=cid,
-                             ts=datetime.now(timezone.utc), payload={"raw": line[:500]})
+                             ts=now, payload={"raw": line[:500]})
         return None
+
+    def _heartbeat_event(self, cid: str) -> FuzzEvent:
+        now = datetime.now(timezone.utc)
+        st = self._stats.setdefault(cid, self._empty_stats(cid))
+        if st.status not in (CampaignStatus.STOPPED, CampaignStatus.FAILED):
+            st.status = CampaignStatus.RUNNING
+        st.last_event_ts = now
+        self._refresh_elapsed(cid, now)
+        self._refresh_coverage_idle(cid, now)
+        return FuzzEvent(
+            kind=EventKind.HEARTBEAT,
+            campaign_id=cid,
+            ts=now,
+            payload={
+                "elapsed_sec": st.elapsed_sec,
+                "execs_total": st.execs_total,
+                "edges_covered": st.edges_covered,
+                "unique_crashes": st.unique_crashes,
+            },
+        )
+
+    def _refresh_elapsed(self, cid: str, now: datetime) -> None:
+        start = self._start_ts.get(cid, now)
+        self._stats[cid].elapsed_sec = int((now - start).total_seconds())
+
+    def _refresh_coverage_idle(self, cid: str, now: datetime) -> None:
+        last_coverage = self._last_coverage_ts.get(cid)
+        if last_coverage is None:
+            return
+        self._stats[cid].last_new_coverage_sec_ago = int(
+            (now - last_coverage).total_seconds()
+        )
 
     @staticmethod
     def _empty_stats(cid: str) -> CampaignStats:

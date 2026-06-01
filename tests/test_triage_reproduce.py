@@ -1,3 +1,4 @@
+from fuzz_agent.agent_harness import AgentObservation
 from fuzz_agent.state.models import BuildArtifact, CampaignConfig, CrashStatus, EngineKind
 from fuzz_agent.tools import _runtime
 from fuzz_agent.tools._runtime import Runtime
@@ -94,5 +95,7 @@ def test_triage_marks_flaky_after_reproduce_errors(tmp_path, monkeypatch):
     assert engine.calls == 3
     trace = rt.store.list_agent_trace(cid)
     attempts = trace[-1]["observation"]["raw"]["reproduce_attempts"]
+    observation = AgentObservation.from_dict(trace[-1]["observation"])
+    assert observation.kind == "crash_reproduce_failure"
     assert attempts[0]["status"] == "error"
     assert attempts[-1]["status"] == "non_reproducible"

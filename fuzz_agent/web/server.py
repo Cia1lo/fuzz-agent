@@ -372,6 +372,7 @@ async def campaigns_page(request: Request) -> Any:
 async def campaign(request: Request, cid: str) -> Any:
     if not _known_campaign(cid):
         raise HTTPException(status_code=404, detail="campaign not found")
+    latest_events = _tail_events(cid, limit=1)
     return templates.TemplateResponse(
         request, "campaign.html",
         {
@@ -379,7 +380,7 @@ async def campaign(request: Request, cid: str) -> Any:
             "summary": _rt().store.summary(cid),
             "meta": _campaign_meta(cid),
             "recent_events": _tail_events(cid),
-            "latest_event": (_tail_events(cid, limit=1) or [None])[-1],
+            "latest_event": latest_events[-1] if latest_events else None,
             "agent_trace": _rt().store.list_agent_trace(cid),
             "crashes": [_jsonable(c) for c in _rt().store.list_crashes(cid)],
         },

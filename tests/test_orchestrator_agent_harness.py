@@ -179,3 +179,4 @@ def test_orchestrator_records_coverage_delta_trace(tmp_path):
     assert trace[-1]["score"]["coverage_delta"] == 8
     assert trace[-1]["score"]["edges_before"] == 13
     assert trace[-1]["score"]["edges_after"] == 21
+    assert trace[-1]["score"]["target_reached"] is None

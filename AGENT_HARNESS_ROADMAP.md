@@ -52,9 +52,9 @@
   - 目标：所有 policy 输入使用同一数据结构。
   - 当前进展：已新增通用 `AgentObservation`，plateau policy 已开始使用。
 
-- [ ] 将 build failure、smoke failure、coverage plateau、crash reproduce failure 都转成 observation。
-  - 当前进展：coverage plateau 已转成 `AgentObservation`；build/smoke 仍使用 `HarnessAttemptObservation`。
-  - 当前限制：这些反馈散落在 orchestrator、tools、engine 和 triage 中。
+- [x] 将 build failure、smoke failure、coverage plateau、crash reproduce failure 都转成 observation。
+  - 当前进展：harness build/smoke feedback 会转换成 `AgentObservation` 再交给 policy 和 trace；coverage plateau/delta 与 crash reproduce/failure 也写入同一 schema。
+  - 剩余限制：`AgentHarnessSession.attempts` 仍保留 `HarnessAttemptObservation` 作为兼容性和调试结构。
   - 目标：agent 决策只依赖结构化 observation，不直接解析原始日志。
 
 - [x] 扩展只读工具 API。
@@ -73,9 +73,9 @@
   - 目标行为：生成 coverage observation，由 policy 决定加 seed、加 dictionary、改 harness 或换 entry point。
   - 当前进展：`_on_plateau()` 已生成 coverage observation，交给 `CoverageStrategyPolicy` 决定是否调用 `mutate_strategy()`，并写入 agent trace。
 
-- [ ] 增加 coverage delta 评分。
+- [x] 增加 coverage delta 评分。
   - 目标：比较新 harness、seed、dictionary 是否实际提升覆盖率。
-  - 验收：每轮 trace 写入 `coverage_delta` 和 `target_reached`。
+  - 当前进展：plateau trace 记录 mutation 前后的 coverage baseline；后续 `NEW_COVERAGE` 会写入 `coverage_delta` trace，并在 score 中保留 `coverage_delta`、`edges_before`、`edges_after` 和 `target_reached` 字段。
 
 - [ ] 根据 uncovered functions 选择动作。
   - 目标：coverage analyst 输出不只用于 seed/dictionary，也能指导 harness 输入建模。

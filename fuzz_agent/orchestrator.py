@@ -431,6 +431,7 @@ class Orchestrator:
                 "coverage_delta": delta,
                 "edges_before": baseline,
                 "edges_after": edges_after,
+                "target_reached": None,
             },
             raw={"event": ev},
         )
