@@ -1,17 +1,21 @@
 {% extends "base.html" %}
 {% block main %}
 <header class="topbar">
-  <h1>Fuzz Agent</h1>
+  <div class="title-stack">
+    <span class="eyebrow">Campaigns</span>
+    <h1>Fuzz Agent</h1>
+  </div>
   <div class="nav-links">
     <a href="/">Chat</a>
-    <div id="flash"></div>
+    <div id="flash" class="inline-status" aria-live="polite"></div>
   </div>
 </header>
 
-<section class="panel">
-  <h2>New campaign</h2>
-  <form id="campaign-form" action="/api/campaigns" method="post"
-        hx-post="/api/campaigns" hx-target="#flash" hx-swap="innerHTML">
+<section class="panel campaign-launcher">
+  <div class="panel-heading">
+    <h2>New campaign</h2>
+  </div>
+  <form id="campaign-form" action="/api/campaigns" method="post">
     <label>Path <input name="path" required></label>
     <label>Seconds <input name="time_sec" type="number" min="1" value="60" required></label>
     <label>Engine
@@ -25,65 +29,55 @@
   </form>
 </section>
 
-<div id="campaign-table"
-     hx-get="/campaigns?fragment=table"
-     hx-trigger="every 5s"
-     hx-swap="outerHTML"
-     hx-select="#campaign-table">
-  <table>
-    <thead>
-      <tr>
-        <th>cid</th>
-        <th>status</th>
-        <th>created_at</th>
-        <th>edges_covered</th>
-        <th>unique_crashes</th>
-      </tr>
-    </thead>
-    <tbody>
-      {% for c in campaigns %}
-      <tr>
-        <td><a href="/campaigns/{{ c.cid }}">{{ c.cid }}</a></td>
-        <td><span class="status">{{ c.status }}</span></td>
-        <td>{{ c.created_at }}</td>
-        <td>{{ c.stats.edges_covered if c.stats else 0 }}</td>
-        <td>{{ c.stats.unique_crashes if c.stats else 0 }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="5" class="muted">No campaigns yet.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</div>
-<script>
-const campaignForm = document.getElementById("campaign-form");
-const flash = document.getElementById("flash");
+<section class="panel campaign-table-panel">
+  <div class="panel-heading">
+    <h2>Campaign queue</h2>
+    <span id="campaign-refresh-state" class="muted">live</span>
+  </div>
+  <div id="campaign-table" data-refresh-url="/api/campaigns">
+    <table>
+      <thead>
+        <tr>
+          <th>campaign</th>
+          <th>state</th>
+          <th>engine</th>
+          <th>runtime</th>
+          <th>throughput</th>
+          <th>coverage</th>
+          <th>crashes</th>
+          <th>latest</th>
+        </tr>
+      </thead>
+      <tbody id="campaign-table-body">
+        {% for c in campaigns %}
+        {% set stats = c.stats or {} %}
+        {% set latest = c.latest_event or {} %}
+        <tr>
+          <td>
+            <a class="campaign-link" href="/campaigns/{{ c.cid }}">{{ c.cid }}</a>
+            {% if c.artifact_name %}<span>{{ c.artifact_name }}</span>{% endif %}
+          </td>
+          <td><span class="status-badge status-{{ c.status }}">{{ c.status }}</span></td>
+          <td>{{ c.engine or "unknown" }}</td>
+          <td>{{ stats.elapsed_sec or 0 }}s / {{ c.time_budget_sec or "?" }}s</td>
+          <td>{{ stats.execs_per_sec or 0 }}/s</td>
+          <td>{{ stats.edges_covered or 0 }}</td>
+          <td>
+            <span class="severity-badge severity-{{ c.highest_severity or 'none' }}">
+              {{ stats.unique_crashes if stats else c.crash_count }}
+            </span>
+          </td>
+          <td>{{ latest.kind or "none" }}</td>
+        </tr>
+        {% else %}
+        <tr><td colspan="8" class="muted">No campaigns yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}
 
-if (!window.htmx && campaignForm) {
-  campaignForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const button = campaignForm.querySelector("button[type='submit']");
-    if (button) button.disabled = true;
-    if (flash) flash.textContent = "Starting campaign...";
-    try {
-      const response = await fetch(campaignForm.action, {
-        method: "POST",
-        body: new FormData(campaignForm),
-      });
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.detail || response.statusText);
-      }
-      if (flash) {
-        flash.innerHTML = `Started <a href="/campaigns/${data.campaign_id}">${data.campaign_id}</a>`;
-      }
-      setTimeout(() => window.location.reload(), 1500);
-    } catch (error) {
-      if (flash) flash.textContent = `Failed: ${error.message || error}`;
-    } finally {
-      if (button) button.disabled = false;
-    }
-  });
-}
-</script>
+{% block scripts %}
+<script src="/static/campaigns.js?v={{ asset_version('campaigns.js') }}" defer></script>
 {% endblock %}

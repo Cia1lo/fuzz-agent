@@ -26,9 +26,14 @@ app = FastAPI(title="Fuzz Agent")
 _WEB_DIR = Path(__file__).parent
 app.mount("/static", StaticFiles(directory=_WEB_DIR / "static"), name="static")
 templates = Jinja2Templates(directory=_WEB_DIR / "templates")
-templates.env.globals["asset_version"] = (
-    lambda: int((_WEB_DIR / "static" / "style.css").stat().st_mtime)
-)
+
+
+def _asset_version(asset: str = "style.css") -> int:
+    path = _WEB_DIR / "static" / asset
+    return int(path.stat().st_mtime) if path.exists() else 0
+
+
+templates.env.globals["asset_version"] = _asset_version
 
 
 class CampaignRequest(BaseModel):
@@ -123,6 +128,54 @@ def _campaign_meta(cid: str) -> dict[str, Any]:
         return cast(dict[str, Any], json.loads(meta_path.read_text(encoding="utf-8")))
     except json.JSONDecodeError:
         return {}
+
+
+def _path_name(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        return ""
+    return Path(value).name
+
+
+def _severity_rank(value: Any) -> int:
+    order = {"critical": 0, "high": 1, "medium": 2, "low": 3, "info": 4}
+    if hasattr(value, "value"):
+        value = value.value
+    if not isinstance(value, str):
+        return 99
+    return order.get(value, 99)
+
+
+def _highest_severity(crashes: list[dict[str, Any]]) -> str:
+    values = [
+        str(crash["severity"])
+        for crash in crashes
+        if crash.get("severity")
+    ]
+    if not values:
+        return ""
+    return sorted(values, key=_severity_rank)[0]
+
+
+def _campaign_dashboard_rows() -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for row in _rt().store.list_campaigns():
+        cid = cast(str, row["cid"])
+        meta = _campaign_meta(cid)
+        artifact = cast(dict[str, Any], meta.get("artifact") or {})
+        stats = cast(dict[str, Any] | None, row.get("stats"))
+        latest_events = _tail_events(cid, limit=1)
+        crashes = [_jsonable(crash) for crash in _rt().store.list_crashes(cid)]
+        rows.append({
+            **row,
+            "engine": artifact.get("engine") or "",
+            "time_budget_sec": meta.get("time_budget_sec") or "",
+            "artifact_name": _path_name(artifact.get("binary_path")),
+            "latest_event": latest_events[-1] if latest_events else None,
+            "crash_count": len(crashes),
+            "highest_severity": _highest_severity(cast(list[dict[str, Any]], crashes)),
+            "stats": stats,
+        })
+    return rows
 
 
 def _read_text(path: Path) -> PlainTextResponse:
@@ -301,7 +354,7 @@ async def chat_page(request: Request) -> Any:
 async def campaigns_page(request: Request) -> Any:
     return templates.TemplateResponse(
         request, "index.html",
-        {"campaigns": _rt().store.list_campaigns()},
+        {"campaigns": _campaign_dashboard_rows()},
     )
 
 
@@ -316,6 +369,7 @@ async def campaign(request: Request, cid: str) -> Any:
             "summary": _rt().store.summary(cid),
             "meta": _campaign_meta(cid),
             "recent_events": _tail_events(cid),
+            "latest_event": (_tail_events(cid, limit=1) or [None])[-1],
             "agent_trace": _rt().store.list_agent_trace(cid),
             "crashes": [_jsonable(c) for c in _rt().store.list_crashes(cid)],
         },
@@ -324,7 +378,7 @@ async def campaign(request: Request, cid: str) -> Any:
 
 @app.get("/api/campaigns")
 async def api_campaigns() -> JSONResponse:
-    return JSONResponse(_rt().store.list_campaigns())
+    return JSONResponse(_campaign_dashboard_rows())
 
 
 @app.get("/api/chat/sessions")

@@ -1,142 +1,131 @@
 {% extends "base.html" %}
+{% block title %}{{ cid }} - Fuzz Agent{% endblock %}
 {% block main %}
-<header class="topbar">
-  <div>
-    <a href="/campaigns">Campaigns</a>
-    <h1>{{ cid }}</h1>
-  </div>
-  <div class="nav-links">
-    <a href="/chat?campaign_id={{ cid }}">Chat</a>
-    <button hx-post="/api/campaigns/{{ cid }}/stop" hx-target="#stop-result">Stop</button>
-  </div>
-</header>
-<div id="stop-result"></div>
-
 {% set stats = summary.stats or {} %}
-<section class="panel summary">
-  <div><span>status</span><strong id="status">{{ stats.status or "pending" }}</strong></div>
-  <div><span>elapsed</span><strong id="elapsed">{{ stats.elapsed_sec or 0 }}</strong></div>
-  <div><span>time_budget</span><strong>{{ meta.time_budget_sec or "" }}</strong></div>
-</section>
+{% set latest = latest_event or {} %}
+<div class="campaign-page" data-campaign-id="{{ cid }}">
+  <header class="topbar campaign-topbar">
+    <div class="title-stack">
+      <a href="/campaigns">Campaigns</a>
+      <h1>{{ cid }}</h1>
+    </div>
+    <div class="nav-links">
+      <a href="/chat?campaign_id={{ cid }}">Chat</a>
+      <button id="stop-campaign" type="button" data-stop-url="/api/campaigns/{{ cid }}/stop">Stop</button>
+    </div>
+  </header>
+  <div id="stop-result" class="inline-status" aria-live="polite"></div>
 
-<section class="panel"
-         hx-get="/api/campaigns/{{ cid }}/stats"
-         hx-trigger="load, every 2s"
-         hx-swap="none">
-  <h2>Stats</h2>
-  <div class="stats-grid">
-    <div><span>execs/sec</span><strong id="execs_per_sec">{{ stats.execs_per_sec or 0 }}</strong></div>
-    <div><span>edges</span><strong id="edges_covered">{{ stats.edges_covered or 0 }}</strong></div>
-    <div><span>crashes</span><strong id="unique_crashes">{{ stats.unique_crashes or 0 }}</strong></div>
+  <section class="panel campaign-console">
+    <div class="campaign-console-main">
+      <span class="status-badge status-{{ stats.status or 'pending' }}" id="status">
+        {{ stats.status or "pending" }}
+      </span>
+      <div>
+        <span class="eyebrow">Runtime</span>
+        <strong><span id="elapsed">{{ stats.elapsed_sec or 0 }}</span>s / {{ meta.time_budget_sec or "?" }}s</strong>
+      </div>
+      <div>
+        <span class="eyebrow">Latest signal</span>
+        <strong id="latest-event-kind">{{ latest.kind or "none" }}</strong>
+      </div>
+    </div>
+    <div class="stats-grid">
+      <div><span>execs/sec</span><strong id="execs_per_sec">{{ stats.execs_per_sec or 0 }}</strong></div>
+      <div><span>execs</span><strong id="execs_total">{{ stats.execs_total or 0 }}</strong></div>
+      <div><span>edges</span><strong id="edges_covered">{{ stats.edges_covered or 0 }}</strong></div>
+      <div><span>corpus</span><strong id="corpus_size">{{ stats.corpus_size or 0 }}</strong></div>
+      <div><span>crashes</span><strong id="unique_crashes">{{ stats.unique_crashes or 0 }}</strong></div>
+      <div><span>coverage idle</span><strong id="last_new_coverage_sec_ago">{{ stats.last_new_coverage_sec_ago if stats.last_new_coverage_sec_ago is not none else "n/a" }}</strong></div>
+    </div>
+  </section>
+
+  <div class="campaign-grid">
+    <section class="panel crash-panel">
+      <div class="panel-heading">
+        <h2>Crashes</h2>
+        <span class="muted">triage</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr><th>id</th><th>severity</th><th>vulnerability</th><th>sanitizer</th><th>status</th></tr>
+          </thead>
+          <tbody id="crash-table">
+            {% for c in crashes %}
+            {% set match = (c.vulnerability_matches or [None])[0] %}
+            <tr>
+              <td><button class="link-button crash-detail-toggle" type="button" data-crash-id="{{ c.crash_id }}">{{ c.crash_id }}</button></td>
+              <td><span class="severity-badge severity-{{ c.severity or 'none' }}">{{ c.severity or "none" }}</span></td>
+              <td>{% if match %}{{ match.cwe or match.rule_id }} {{ match.title }}{% endif %}</td>
+              <td>{{ c.sanitizer_kind or "" }}</td>
+              <td>{{ c.status or "" }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="5" class="muted">No crashes.</td></tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <aside class="side-stack">
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>Artifacts</h2>
+        </div>
+        <div class="artifact-links">
+          <a href="/api/campaigns/{{ cid }}/logs/run">run log</a>
+          <a href="/api/campaigns/{{ cid }}/logs/build">build log</a>
+          <a href="/api/campaigns/{{ cid }}/harness">harness source</a>
+          <a href="/api/campaigns/{{ cid }}/agent-trace">agent trace</a>
+          <a href="/api/campaigns/{{ cid }}/coverage/summary">coverage summary</a>
+          <a href="/api/campaigns/{{ cid }}/coverage/uncovered">uncovered JSON</a>
+        </div>
+      </section>
+
+      <section class="panel event-panel">
+        <div class="panel-heading">
+          <h2>Live events</h2>
+          <span class="muted">SSE</span>
+        </div>
+        <ul id="event-stream"></ul>
+      </section>
+    </aside>
   </div>
-</section>
 
-<section class="panel"
-         hx-get="/api/campaigns/{{ cid }}/crashes"
-         hx-trigger="load, every 5s"
-         hx-swap="none">
-  <h2>Crashes</h2>
-  <table>
-    <thead><tr><th>id</th><th>severity</th><th>vulnerability</th><th>sanitizer</th><th>stack</th></tr></thead>
-    <tbody id="crash-table">
-      {% for c in crashes %}
-      <tr>
-        <td>{{ c.crash_id }}</td>
-        <td>{{ c.severity or "" }}</td>
-        <td>
-          {% if c.vulnerability_matches %}
-          {{ c.vulnerability_matches[0].cwe or c.vulnerability_matches[0].rule_id }}
-          {{ c.vulnerability_matches[0].title }}
-          {% endif %}
-        </td>
-        <td>{{ c.sanitizer_kind or "" }}</td>
-        <td>{{ c.stack_hash }}</td>
-      </tr>
-      {% else %}
-      <tr><td colspan="5" class="muted">No crashes.</td></tr>
-      {% endfor %}
-    </tbody>
-  </table>
-</section>
-
-<section class="panel">
-  <h2>Agent trace</h2>
-  <table class="trace-table">
-    <thead><tr><th>step</th><th>phase</th><th>decision</th><th>score</th><th>diagnostics</th></tr></thead>
-    <tbody>
+  <section class="panel trace-panel">
+    <div class="panel-heading">
+      <h2>Agent trace</h2>
+      <span class="muted">{{ agent_trace|length }} steps</span>
+    </div>
+    <ol class="trace-list">
       {% for step in agent_trace %}
       {% set obs = step.observation or {} %}
       {% set decision = step.decision or {} %}
-      <tr>
-        <td>{{ step.step or loop.index }}</td>
-        <td>{{ step.phase or "" }}</td>
-        <td>{{ decision.action or "" }}<span>{{ decision.reason or "" }}</span></td>
-        <td><code>{{ (step.score or {})|tojson }}</code></td>
-        <td class="trace-diagnostics">{{ obs.diagnostics or "" }}</td>
-      </tr>
+      <li class="trace-step">
+        <span class="trace-index">{{ step.step or loop.index }}</span>
+        <div class="trace-body">
+          <div class="trace-head">
+            <strong>{{ step.phase or "step" }}</strong>
+            <span>{{ decision.action or "observed" }}</span>
+          </div>
+          {% if decision.reason %}<p>{{ decision.reason }}</p>{% endif %}
+          {% if obs.diagnostics %}<p class="trace-diagnostics">{{ obs.diagnostics }}</p>{% endif %}
+          <details>
+            <summary>score</summary>
+            <code>{{ (step.score or {})|tojson }}</code>
+          </details>
+        </div>
+      </li>
       {% else %}
-      <tr><td colspan="5" class="muted">No agent trace.</td></tr>
+      <li class="muted">No agent trace.</li>
       {% endfor %}
-    </tbody>
-  </table>
-</section>
+    </ol>
+  </section>
+</div>
+{% endblock %}
 
-<section class="panel">
-  <h2>Artifacts</h2>
-  <div class="artifact-links">
-    <a href="/api/campaigns/{{ cid }}/logs/run">run log</a>
-    <a href="/api/campaigns/{{ cid }}/logs/build">build log</a>
-    <a href="/api/campaigns/{{ cid }}/harness">harness source</a>
-    <a href="/api/campaigns/{{ cid }}/agent-trace">agent trace</a>
-    <a href="/api/campaigns/{{ cid }}/coverage/summary">coverage summary</a>
-    <a href="/api/campaigns/{{ cid }}/coverage/uncovered">uncovered JSON</a>
-  </div>
-</section>
-
-<section class="panel">
-  <h2>Live events</h2>
-  <ul id="event-stream"></ul>
-</section>
-
-<script>
-const cid = {{ cid|tojson }};
-const source = new EventSource(`/api/campaigns/${cid}/events`);
-const list = document.getElementById("event-stream");
-
-function addEvent(name, event) {
-  const data = JSON.parse(event.data);
-  const li = document.createElement("li");
-  li.className = name === "replay" ? "replay" : (data.kind || name);
-  li.textContent = `[${data.ts || ""}] ${data.kind || name} ${JSON.stringify(data.payload || {})}`;
-  list.prepend(li);
-  while (list.children.length > 200) list.lastElementChild.remove();
-}
-
-["replay", "new_coverage", "new_crash", "plateau", "oom", "timeout", "engine_error", "heartbeat"]
-  .forEach((kind) => source.addEventListener(kind, (event) => addEvent(kind, event)));
-
-document.body.addEventListener("htmx:afterRequest", (event) => {
-  const path = event.detail.pathInfo.requestPath;
-  if (!event.detail.successful || !path.includes(`/api/campaigns/${cid}/`)) return;
-  const data = JSON.parse(event.detail.xhr.responseText || "null");
-  if (path.endsWith("/stats")) {
-    ["status", "elapsed_sec", "execs_per_sec", "edges_covered", "unique_crashes"].forEach((key) => {
-      const el = document.getElementById(key === "elapsed_sec" ? "elapsed" : key);
-      if (el && data[key] !== undefined) el.textContent = data[key];
-    });
-  }
-  if (path.endsWith("/crashes")) {
-    const body = document.getElementById("crash-table");
-    body.innerHTML = data.length ? data.map((c) =>
-      `<tr><td>${c.crash_id}</td><td>${c.severity || ""}</td><td>${vulnText(c)}</td><td>${c.sanitizer_kind || ""}</td><td>${c.stack_hash}</td></tr>`
-    ).join("") : `<tr><td colspan="5" class="muted">No crashes.</td></tr>`;
-  }
-});
-
-function vulnText(crash) {
-  const match = (crash.vulnerability_matches || [])[0];
-  if (!match) return "";
-  return `${match.cwe || match.rule_id} ${match.title || ""}`;
-}
-</script>
+{% block scripts %}
+<script src="/static/campaign.js?v={{ asset_version('campaign.js') }}" defer></script>
 {% endblock %}

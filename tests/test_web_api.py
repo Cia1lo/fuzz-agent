@@ -62,7 +62,9 @@ def test_campaigns_page_renders(client):
     assert 'href="/"' in response.text
     assert 'id="campaign-form"' in response.text
     assert 'action="/api/campaigns"' in response.text
-    assert 'hx-get="/campaigns?fragment=table"' in response.text
+    assert 'data-refresh-url="/api/campaigns"' in response.text
+    assert 'src="/static/campaigns.js' in response.text
+    assert "unpkg.com/htmx" not in response.text
 
 
 def test_chat_page_renders(client):
@@ -76,10 +78,8 @@ def test_chat_page_renders(client):
     assert 'id="session-list"' in response.text
     assert 'id="new-session"' in response.text
     assert 'id="command-hints"' in response.text
-    assert 'fetch("/api/chat/stream"' in response.text
-    assert "readEventStream" in response.text
-    assert "appendMarkdownBlocks" in response.text
-    assert "appendInlineMarkdown" in response.text
+    assert 'src="/static/chat.js' in response.text
+    assert "unpkg.com/htmx" not in response.text
 
 
 def test_api_chat_greeting(client, monkeypatch):
@@ -209,6 +209,8 @@ def test_api_campaigns_after_seed(client, web_rt, make_stats):
     assert len(data) == 1
     assert data[0]["cid"] == cid
     assert data[0]["stats"]["edges_covered"] == 42
+    assert data[0]["time_budget_sec"] == 60
+    assert data[0]["engine"] == "libfuzzer"
 
 
 def test_api_campaign_summary_404(client):
