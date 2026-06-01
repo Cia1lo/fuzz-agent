@@ -431,7 +431,7 @@ tbody tr:nth-child(even) { background: #14181c; }
 }
 .chat-app {
   display: grid;
-  grid-template-columns: 256px minmax(0, 1fr);
+  grid-template-columns: minmax(292px, 320px) minmax(0, 1fr);
   gap: 14px;
   height: 100%;
   min-height: 0;
@@ -484,9 +484,9 @@ tbody tr:nth-child(even) { background: #14181c; }
 }
 .session-card {
   display: grid;
-  gap: 3px;
+  gap: 5px;
   width: 100%;
-  min-height: 48px;
+  min-height: 72px;
   border: 1px solid transparent;
   border-left: 2px solid transparent;
   background: transparent;
@@ -505,17 +505,31 @@ tbody tr:nth-child(even) { background: #14181c; }
   background: var(--console-raised);
 }
 .session-card strong {
-  overflow: hidden;
   font-size: 13px;
   font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
-.session-card span,
+.session-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.session-meta,
 .session-empty {
   margin: 0;
   color: var(--muted);
   font-size: 12px;
+}
+.session-meta {
+  color: var(--log-slate);
+  font-size: 11px;
 }
 .chat-workspace {
   display: grid;

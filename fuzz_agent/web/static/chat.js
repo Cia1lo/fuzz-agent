@@ -362,13 +362,30 @@
     sessions.forEach((session) => {
       const button = element("button", {className: "session-card", attrs: {type: "button"}});
       if (session.session_id === currentSessionId) button.classList.add("active");
+      const title = element("strong", {
+        text: session.title || "New session",
+        attrs: {title: session.title || "New session"},
+      });
+      const previewText = sessionPreview(session);
       button.append(
-        element("strong", {text: session.title || "New session"}),
-        element("span", {text: sessionMeta(session)}),
+        title,
+        element("span", {
+          className: "session-preview",
+          text: previewText,
+          attrs: {title: previewText},
+        }),
+        element("span", {className: "session-meta", text: sessionMeta(session)}),
       );
       button.addEventListener("click", () => loadSession(session.session_id));
       sessionList.appendChild(button);
     });
+  }
+
+  function sessionPreview(session) {
+    const preview = session.preview || "";
+    if (!preview) return "No messages yet.";
+    const role = session.preview_role === "user" ? "you" : "agent";
+    return `${role}: ${preview}`;
   }
 
   function sessionMeta(session) {

@@ -195,6 +195,13 @@ def _chat_session_title(session: ChatSession) -> str:
     return "New session"
 
 
+def _chat_session_preview(session: ChatSession) -> tuple[str, str]:
+    for turn in reversed(session.history):
+        if turn.content.strip():
+            return turn.role, _short_label(turn.content, limit=110)
+    return "", ""
+
+
 def _short_label(value: str, limit: int = 42) -> str:
     text = " ".join(value.split())
     if len(text) <= limit:
@@ -233,9 +240,12 @@ def _list_chat_sessions() -> list[ChatSession]:
 
 
 def _chat_session_json(session: ChatSession, *, include_history: bool = False) -> dict[str, Any]:
+    preview_role, preview = _chat_session_preview(session)
     data: dict[str, Any] = {
         "session_id": session.session_id,
         "title": _chat_session_title(session),
+        "preview": preview,
+        "preview_role": preview_role,
         "active_campaign_id": session.active_campaign_id,
         "target_path": session.target_path,
         "turn_count": len(session.history),

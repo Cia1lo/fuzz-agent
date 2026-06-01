@@ -128,6 +128,8 @@ def test_api_chat_sessions_list_and_detail(client, monkeypatch):
     assert sessions.status_code == 200
     assert sessions.json()[0]["session_id"] == "web-history-test"
     assert sessions.json()[0]["title"] == "你好"
+    assert sessions.json()[0]["preview"]
+    assert sessions.json()[0]["preview_role"] == "assistant"
     assert detail.status_code == 200
     assert len(detail.json()["history"]) == 2
     assert detail.json()["created_at"]
