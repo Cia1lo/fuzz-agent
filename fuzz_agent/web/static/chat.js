@@ -16,6 +16,17 @@
   const sessionList = document.getElementById("session-list");
   const newSessionButton = document.getElementById("new-session");
   const commandHints = document.getElementById("command-hints");
+  const statusRail = document.getElementById("chat-status-rail");
+  const statusText = document.getElementById("chat-status-text");
+  const contextPanel = document.getElementById("campaign-context-panel");
+  const contextState = document.getElementById("context-state");
+  const contextEmpty = document.getElementById("context-empty");
+  const contextBody = document.getElementById("context-body");
+  const contextLink = document.getElementById("context-campaign-link");
+  const contextStatus = document.getElementById("context-status");
+  const contextExecs = document.getElementById("context-execs");
+  const contextEdges = document.getElementById("context-edges");
+  const contextCrashes = document.getElementById("context-crashes");
 
   if (!log || !form || !input || !submit || !context || !sessionShort || !sessionList) {
     return;
@@ -31,6 +42,7 @@
   ];
   const sentMessages = [];
   let recallIndex = null;
+  let contextRefreshTimer = null;
 
   function newSessionId() {
     return (window.crypto && crypto.randomUUID)
@@ -62,14 +74,21 @@
       ? element("a", {text: currentCampaignId, attrs: {href: `/campaigns/${currentCampaignId}`}})
       : element("strong", {text: "global"});
     context.append(label, value);
+    scheduleCampaignContext();
   }
 
   function showEmpty() {
     log.replaceChildren();
     const empty = element("div", {className: "chat-empty", id: "chat-empty"});
+    const actions = element("div", {className: "chat-empty-actions"});
+    actions.append(
+      element("button", {text: "status", attrs: {type: "button", "data-command": "status"}}),
+      element("button", {text: "help", attrs: {type: "button", "data-command": "help"}}),
+    );
     empty.append(
       element("span", {text: "ready"}),
       element("strong", {text: "agent command channel"}),
+      actions,
     );
     log.appendChild(empty);
   }
@@ -78,13 +97,17 @@
     const empty = document.getElementById("chat-empty");
     if (empty) empty.remove();
     const row = element("div", {className: `chat-row ${role}`});
+    const messageKind = role === "assistant" ? classifyAssistantMessage(text || "") : "user";
     const bubble = element("div", {className: "chat-bubble"});
+    bubble.classList.add(`message-${messageKind}`);
     bubble.appendChild(element("span", {
       className: "chat-role",
       text: role === "user" ? "you" : "agent",
     }));
     const body = element("div", {className: "chat-text"});
+    const summary = role === "assistant" ? messageSummaryCard(text || "", messageKind) : null;
     renderMessageText(body, text || "");
+    if (summary) body.prepend(summary);
     bubble.appendChild(body);
     if (role !== "user") bubble.appendChild(messageActions(text || ""));
     row.appendChild(bubble);
@@ -213,6 +236,79 @@
     return /^(https?:\/\/|\/(?!\/)|#)/i.test(value);
   }
 
+  function classifyAssistantMessage(text) {
+    const lower = text.toLowerCase();
+    if (lower.startsWith("failed:") || lower.includes("error") || text.includes("异常")) {
+      return "error";
+    }
+    if (text.includes("状态:") || lower.includes("unique crashes:")) {
+      return "status";
+    }
+    if (lower.includes("agent trace") || text.includes("诊断:")) {
+      return "trace";
+    }
+    if (lower.includes("crash") || text.includes("Crash 证据") || text.includes("分诊")) {
+      return "crash";
+    }
+    return "plain";
+  }
+
+  function messageSummaryCard(text, kind) {
+    if (kind === "plain") return null;
+    const card = element("div", {className: `message-summary message-summary-${kind}`});
+    const head = element("div", {className: "message-summary-head"});
+    head.append(
+      element("span", {className: `signal-dot signal-${kind}`}),
+      element("strong", {text: summaryTitle(kind)}),
+    );
+    card.appendChild(head);
+    if (kind === "status") {
+      card.appendChild(metricGrid([
+        ["status", matchValue(text, /状态:\s*([^\n]+)/)],
+        ["speed", matchValue(text, /速度:\s*([^\n]+)/)],
+        ["edges", matchValue(text, /覆盖边:\s*([^\n]+)/)],
+        ["crashes", matchValue(text, /unique crashes:\s*([^\n]+)/i)],
+      ]));
+    } else if (kind === "crash") {
+      card.appendChild(metricGrid([
+        ["results", matchValue(text, /共\s*(\d+)\s*个结果/) || matchValue(text, /发现\s*(\d+)\s*个 crash/i)],
+        ["status", text.includes("没有可展示") ? "none" : "review"],
+      ]));
+    } else if (kind === "trace") {
+      card.appendChild(metricGrid([
+        ["scope", matchValue(text, /campaign `([^`]+)`/) || "campaign"],
+        ["signal", "agent trace"],
+      ]));
+    } else if (kind === "error") {
+      card.appendChild(element("p", {text: "The command did not complete. Review the message below."}));
+    }
+    return card;
+  }
+
+  function summaryTitle(kind) {
+    return {
+      status: "Campaign status",
+      trace: "Agent trace",
+      crash: "Crash triage",
+      error: "Command failed",
+    }[kind] || "Response";
+  }
+
+  function metricGrid(items) {
+    const grid = element("div", {className: "message-metrics"});
+    items.filter(([, value]) => value).forEach(([label, value]) => {
+      const item = element("div");
+      item.append(element("span", {text: label}), element("strong", {text: value}));
+      grid.appendChild(item);
+    });
+    return grid;
+  }
+
+  function matchValue(text, pattern) {
+    const match = pattern.exec(text);
+    return match ? match[1].trim() : "";
+  }
+
   function messageActions(text) {
     const actions = element("div", {className: "chat-actions"});
     const copy = element("button", {text: "copy", attrs: {type: "button"}});
@@ -237,29 +333,79 @@
   }
 
   function addBusy(text = "working") {
-    clearBusy();
-    const row = element("div", {className: "chat-row assistant busy", id: "chat-busy"});
-    const bubble = element("div", {className: "chat-bubble"});
-    bubble.append(
-      element("span", {className: "chat-role", text: "agent"}),
-      element("div", {className: "chat-text", text}),
-    );
-    row.appendChild(bubble);
-    log.appendChild(row);
-    log.scrollTop = log.scrollHeight;
+    setStatusRail(text, true);
   }
 
   function updateBusy(text) {
-    const body = document.querySelector("#chat-busy .chat-text");
-    if (body && text) {
-      body.textContent = text;
-      log.scrollTop = log.scrollHeight;
-    }
+    if (text) setStatusRail(text, true);
   }
 
   function clearBusy() {
-    const row = document.getElementById("chat-busy");
-    if (row) row.remove();
+    setStatusRail("", false);
+  }
+
+  function setStatusRail(text, visible) {
+    if (!statusRail || !statusText) return;
+    statusRail.hidden = !visible;
+    if (visible) statusText.textContent = text || "working";
+  }
+
+  function setSendingState(active) {
+    submit.disabled = active;
+    input.disabled = active;
+    document.querySelectorAll("[data-command]").forEach((button) => {
+      button.disabled = active;
+    });
+  }
+
+  function scheduleCampaignContext() {
+    if (contextRefreshTimer) {
+      clearInterval(contextRefreshTimer);
+      contextRefreshTimer = null;
+    }
+    refreshCampaignContext();
+    if (currentCampaignId) {
+      contextRefreshTimer = setInterval(refreshCampaignContext, 5000);
+    }
+  }
+
+  async function refreshCampaignContext() {
+    if (!contextPanel || !contextState || !contextEmpty || !contextBody) return;
+    if (!currentCampaignId) {
+      contextPanel.classList.remove("has-campaign");
+      contextState.textContent = "global";
+      contextEmpty.hidden = false;
+      contextBody.hidden = true;
+      return;
+    }
+    contextPanel.classList.add("has-campaign");
+    contextState.textContent = "loading";
+    contextEmpty.hidden = true;
+    contextBody.hidden = false;
+    if (contextLink) {
+      contextLink.href = `/campaigns/${currentCampaignId}`;
+      contextLink.textContent = currentCampaignId;
+    }
+    try {
+      const response = await fetch(`/api/campaigns/${currentCampaignId}/stats`, {
+        headers: {"accept": "application/json"},
+      });
+      if (!response.ok) throw new Error(response.statusText);
+      const stats = await response.json();
+      contextState.textContent = stats.status || "pending";
+      if (contextStatus) contextStatus.textContent = stats.status || "pending";
+      if (contextExecs) contextExecs.textContent = valueOrZero(stats.execs_per_sec);
+      if (contextEdges) contextEdges.textContent = valueOrZero(stats.edges_covered);
+      if (contextCrashes) contextCrashes.textContent = valueOrZero(stats.unique_crashes);
+    } catch (error) {
+      contextState.textContent = "unavailable";
+      if (contextStatus) contextStatus.textContent = "unknown";
+    }
+  }
+
+  function valueOrZero(value) {
+    if (value === undefined || value === null || value === "") return "0";
+    return String(value);
   }
 
   async function readEventStream(response, onEvent) {
@@ -307,8 +453,7 @@
   async function send(message) {
     addMessage("user", message);
     addBusy("connecting");
-    submit.disabled = true;
-    input.disabled = true;
+    setSendingState(true);
     rememberMessage(message);
     let receivedFinal = false;
     try {
@@ -345,8 +490,7 @@
       clearBusy();
       addMessage("assistant", `Failed: ${error.message || error}`);
     } finally {
-      submit.disabled = false;
-      input.disabled = false;
+      setSendingState(false);
       input.focus();
     }
   }
@@ -366,15 +510,17 @@
         text: session.title || "New session",
         attrs: {title: session.title || "New session"},
       });
+      const head = element("div", {className: "session-card-head"});
+      head.appendChild(title);
       const previewText = sessionPreview(session);
       button.append(
-        title,
+        head,
         element("span", {
           className: "session-preview",
           text: previewText,
           attrs: {title: previewText},
         }),
-        element("span", {className: "session-meta", text: sessionMeta(session)}),
+        sessionMetaElement(session),
       );
       button.addEventListener("click", () => loadSession(session.session_id));
       sessionList.appendChild(button);
@@ -394,6 +540,25 @@
       : `${session.turn_count || 0} turns`;
     const recency = relativeTime(session.updated_at);
     return recency ? `${scope} - ${recency}` : scope;
+  }
+
+  function sessionMetaElement(session) {
+    const meta = element("span", {className: "session-meta"});
+    const recency = relativeTime(session.updated_at);
+    if (session.active_campaign_id) {
+      meta.append(
+        element("span", {className: "session-scope-badge", text: "campaign"}),
+        element("span", {
+          className: "session-campaign-id",
+          text: session.active_campaign_id,
+          attrs: {title: session.active_campaign_id},
+        }),
+      );
+      if (recency) meta.appendChild(element("span", {className: "session-recency", text: recency}));
+      return meta;
+    }
+    meta.textContent = sessionMeta(session);
+    return meta;
   }
 
   function relativeTime(value) {
@@ -509,11 +674,11 @@
     }
   });
 
-  document.querySelectorAll("[data-command]").forEach((button) => {
-    button.addEventListener("click", () => {
-      const command = button.getAttribute("data-command");
-      if (command) send(command);
-    });
+  document.addEventListener("click", (event) => {
+    const button = event.target.closest("[data-command]");
+    if (!button || button.disabled) return;
+    const command = button.getAttribute("data-command");
+    if (command) send(command);
   });
 
   if (newSessionButton) newSessionButton.addEventListener("click", startNewSession);

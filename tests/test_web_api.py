@@ -78,6 +78,9 @@ def test_chat_page_renders(client):
     assert 'id="session-list"' in response.text
     assert 'id="new-session"' in response.text
     assert 'id="command-hints"' in response.text
+    assert 'id="campaign-context-panel"' in response.text
+    assert 'id="chat-status-rail"' in response.text
+    assert 'class="prompt-mark"' in response.text
     assert 'src="/static/chat.js' in response.text
     assert "unpkg.com/htmx" not in response.text
 

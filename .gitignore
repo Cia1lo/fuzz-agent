@@ -21,3 +21,6 @@ timeout-*
 
 # Local shell/environment overrides.
 .envrc
+
+# macOS Finder metadata.
+.DS_Store

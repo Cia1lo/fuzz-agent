@@ -29,7 +29,15 @@
         <div class="chat-empty" id="chat-empty">
           <span>ready</span>
           <strong>agent command channel</strong>
+          <div class="chat-empty-actions">
+            <button type="button" data-command="status">status</button>
+            <button type="button" data-command="help">help</button>
+          </div>
         </div>
+      </div>
+      <div id="chat-status-rail" class="chat-status-rail" hidden>
+        <span class="signal-dot signal-running"></span>
+        <strong id="chat-status-text">idle</strong>
       </div>
       <div class="command-strip" aria-label="Quick commands">
         <button type="button" data-command="status">status</button>
@@ -40,11 +48,34 @@
       <div id="command-hints" class="command-hints" hidden></div>
       <form id="chat-form" class="chat-form">
         <label class="sr-only" for="chat-input">Message</label>
+        <span class="prompt-mark" aria-hidden="true">&gt;</span>
         <textarea id="chat-input" name="message" rows="1" autocomplete="off" autofocus
                   placeholder="Type a message or command"></textarea>
         <button id="chat-submit" type="submit">Send</button>
       </form>
     </div>
+
+    <aside class="chat-context-panel" id="campaign-context-panel" aria-label="Campaign context">
+      <div class="panel-heading">
+        <h2>Campaign context</h2>
+        <span id="context-state" class="muted">global</span>
+      </div>
+      <div id="context-empty" class="context-empty">No campaign selected.</div>
+      <div id="context-body" class="context-body" hidden>
+        <a id="context-campaign-link" class="context-campaign-link" href="#"></a>
+        <div class="context-stats">
+          <div><span>status</span><strong id="context-status">pending</strong></div>
+          <div><span>exec/s</span><strong id="context-execs">0</strong></div>
+          <div><span>edges</span><strong id="context-edges">0</strong></div>
+          <div><span>crashes</span><strong id="context-crashes">0</strong></div>
+        </div>
+        <div class="context-actions">
+          <button type="button" data-command="status">status</button>
+          <button type="button" data-command="trace">trace</button>
+          <button type="button" data-command="triage">triage</button>
+        </div>
+      </div>
+    </aside>
   </section>
 </section>
 {% endblock %}
