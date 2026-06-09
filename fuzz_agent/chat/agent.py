@@ -14,6 +14,14 @@ from ..orchestrator import CampaignGoal, Orchestrator
 from ..state.models import CampaignStats, CrashRecord, EngineKind, TargetProfile
 from ..state.store import CampaignStore
 from ..subagents._llm import call_llm, call_llm_json
+from .memory import (
+    build_chat_memory_prompt,
+    build_intent_prompt,
+    note_error,
+    note_intent,
+    note_reply,
+    refresh_session_summary,
+)
 from .session import ChatSession
 
 _INTENTS = {
@@ -133,12 +141,17 @@ class ConversationAgent:
         try:
             reply = await self._dispatch(session, text)
         except Exception as exc:  # noqa: BLE001
-            reply = f"执行失败：{type(exc).__name__}: {exc}"
+            error = f"{type(exc).__name__}: {exc}"
+            note_error(session, error)
+            reply = f"执行失败：{error}"
         session.add_turn("assistant", reply)
+        note_reply(session, reply)
+        refresh_session_summary(session)
         return reply
 
     async def _dispatch(self, session: ChatSession, text: str) -> str:
         intent = self._parse_intent(session, text)
+        note_intent(session, intent=intent.intent, command=text)
         if intent.intent == "help":
             return _help_text()
         if intent.intent == "status":
@@ -164,7 +177,7 @@ class ConversationAgent:
         if rule_intent.intent != "unknown":
             return rule_intent
         if _llm_enabled():
-            llm_intent = _llm_intent(session, text)
+            llm_intent = _llm_intent(session, text, self.store)
             if llm_intent.intent != "unknown":
                 return llm_intent
         return ChatIntent(intent="chat") if _looks_like_chat(text) else rule_intent
@@ -241,7 +254,11 @@ class ConversationAgent:
             return intent.reply
         if _llm_enabled():
             try:
-                reply = call_llm(_CHAT_SYSTEM, _chat_prompt(session, text), max_tokens=512)
+                reply = call_llm(
+                    _CHAT_SYSTEM,
+                    _chat_prompt(session, text, self.store),
+                    max_tokens=512,
+                )
                 if reply.strip():
                     return reply.strip()
             except Exception:  # noqa: BLE001
@@ -319,9 +336,13 @@ def _llm_enabled() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY")) and disabled not in {"0", "false", "off", "no"}
 
 
-def _llm_intent(session: ChatSession, text: str) -> ChatIntent:
+def _llm_intent(
+    session: ChatSession,
+    text: str,
+    store: CampaignStore | None = None,
+) -> ChatIntent:
     try:
-        raw = call_llm_json(_INTENT_SYSTEM, _intent_prompt(session, text), max_tokens=512)
+        raw = call_llm_json(_INTENT_SYSTEM, _intent_prompt(session, text, store), max_tokens=512)
     except Exception:  # noqa: BLE001
         return ChatIntent(intent="unknown")
     return _parse_llm_intent(raw)
@@ -365,27 +386,20 @@ def _optional_engine(value: Any) -> EngineKind | None:
         return None
 
 
-def _intent_prompt(session: ChatSession, text: str) -> str:
-    return (
-        f"Active campaign id: {session.active_campaign_id or 'none'}\n"
-        f"Known target path: {session.target_path or 'none'}\n"
-        f"Recent conversation:\n{_recent_history(session)}\n\n"
-        f"User message: {text}"
-    )
+def _intent_prompt(
+    session: ChatSession,
+    text: str,
+    store: CampaignStore | None = None,
+) -> str:
+    return build_intent_prompt(session, text, store=store)
 
 
-def _chat_prompt(session: ChatSession, text: str) -> str:
-    return (
-        f"Active campaign id: {session.active_campaign_id or 'none'}\n"
-        f"Known target path: {session.target_path or 'none'}\n"
-        f"Recent conversation:\n{_recent_history(session)}\n\n"
-        f"User message: {text}"
-    )
-
-
-def _recent_history(session: ChatSession) -> str:
-    rows = session.history[-6:]
-    return "\n".join(f"{turn.role}: {turn.content}" for turn in rows) or "none"
+def _chat_prompt(
+    session: ChatSession,
+    text: str,
+    store: CampaignStore | None = None,
+) -> str:
+    return build_chat_memory_prompt(session, text, store=store)
 
 
 def _path_from_intent(intent: ChatIntent, text: str, session: ChatSession) -> Path | None:

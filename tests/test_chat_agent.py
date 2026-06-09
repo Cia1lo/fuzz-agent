@@ -3,7 +3,8 @@ from datetime import datetime, timezone
 
 from click.testing import CliRunner
 
-from fuzz_agent.chat import ChatSession, ConversationAgent
+from fuzz_agent.chat import ChatSession, ChatTurn, ConversationAgent
+from fuzz_agent.chat.memory import recent_history
 from fuzz_agent.cli import main
 from fuzz_agent.events.stream import EventBus
 from fuzz_agent.state.models import (
@@ -32,6 +33,39 @@ def test_chat_analyze_target_sets_session_target(tmp_path):
     assert "语言: python" in reply
     assert "parse_json" in reply
     assert session.target_path == str(tmp_path.resolve())
+    assert session.working_memory["last_intent"] == "analyze"
+    assert session.working_memory["last_command"].startswith("analyze")
+    assert "语言: python" in session.working_memory["last_reply"]
+
+
+def test_chat_session_memory_roundtrip():
+    session = ChatSession(
+        session_id="memory-test",
+        active_campaign_id="cid123",
+        target_path="/tmp/target",
+        summary="older turns summary",
+        working_memory={"last_intent": "status"},
+        history=[ChatTurn(role="user", content="status")],
+    )
+
+    restored = ChatSession.from_dict(session.to_dict())
+
+    assert restored.summary == "older turns summary"
+    assert restored.working_memory == {"last_intent": "status"}
+    assert restored.history[0].content == "status"
+
+
+def test_recent_history_uses_character_budget():
+    session = ChatSession(history=[
+        ChatTurn(role="user", content=f"turn {idx}")
+        for idx in range(10)
+    ])
+
+    history = recent_history(session, char_budget=50)
+
+    assert "turn 9" in history
+    assert "turn 0" not in history
+    assert len(history) <= 50
 
 
 def test_chat_status_uses_explicit_campaign_id(tmp_path, monkeypatch, make_stats):
@@ -46,6 +80,21 @@ def test_chat_status_uses_explicit_campaign_id(tmp_path, monkeypatch, make_stats
     assert "campaign `abc123`" in reply
     assert "unique crashes: 2" in reply
     assert session.active_campaign_id == "abc123"
+
+
+def test_chat_prompt_includes_campaign_snapshot(tmp_path, make_stats):
+    rt = Runtime(root=tmp_path)
+    cid = _new_test_campaign(rt)
+    rt.store.record_stats(make_stats(cid, unique_crashes=2, edges_covered=7))
+    session = ChatSession(active_campaign_id=cid)
+
+    from fuzz_agent.chat.agent import _chat_prompt
+
+    prompt = _chat_prompt(session, "what happened?", rt.store)
+
+    assert f"campaign_id: {cid}" in prompt
+    assert "edges_covered: 7" in prompt
+    assert "unique_crashes: 2" in prompt
 
 
 def test_chat_status_without_campaign_does_not_treat_command_as_id(tmp_path):

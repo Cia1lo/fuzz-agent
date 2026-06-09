@@ -109,6 +109,7 @@ class AgentHarnessSession:
                     attempt=attempt,
                     max_attempts=self.max_attempts,
                 )
+                diagnostics = self._attempt_memory_diagnostics(diagnostics)
                 next_spec, action_result = self._apply_decision_action(
                     decision,
                     spec,
@@ -152,6 +153,7 @@ class AgentHarnessSession:
                 attempt=attempt,
                 max_attempts=self.max_attempts,
             )
+            diagnostics = self._attempt_memory_diagnostics(diagnostics)
             next_spec, action_result = self._apply_decision_action(
                 decision,
                 spec,
@@ -459,6 +461,27 @@ class AgentHarnessSession:
             return "build and artifact validation passed"
         return "\n".join(f"{v.name}: {v.detail}" for v in failed)
 
+    def _attempt_memory_diagnostics(self, latest_diagnostics: str) -> str:
+        if not self.attempts:
+            return latest_diagnostics
+        lines = ["Recent harness attempt memory:"]
+        for observation in self.attempts[-3:]:
+            status = "build_passed" if observation.build_passed else "build_failed"
+            failed = [v for v in observation.validations if not v.passed]
+            failed_text = ", ".join(f"{v.name}: {v.detail}" for v in failed) or "none"
+            lines.extend([
+                f"- attempt {observation.attempt}: {status}",
+                f"  entry: {observation.entry}",
+                f"  failed_validations: {_shorten(failed_text, 500)}",
+            ])
+            if observation.build_failure:
+                lines.append(f"  build_failure: {observation.build_failure}")
+            if observation.diagnostics:
+                lines.append(f"  diagnostics_tail: {_shorten(observation.diagnostics, 1200)}")
+        if latest_diagnostics:
+            lines.extend(["", "Latest full diagnostics:", latest_diagnostics])
+        return "\n".join(lines)
+
 
 def _tool_chain_for_decision(action: HarnessAction) -> list[str]:
     if action is HarnessAction.PATCH_HARNESS:
@@ -542,3 +565,12 @@ def _apply_unified_diff(original: str, patch: str) -> str:
 
 def _build_log_tail(path: Path) -> str:
     return path.read_text(errors="replace")[-8000:] if path.exists() else ""
+
+
+def _shorten(value: str, limit: int) -> str:
+    text = value.strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return text[:limit]
+    return text[: limit - 1] + "..."

@@ -124,6 +124,8 @@ def test_agent_harness_session_retries_with_build_diagnostics(tmp_path):
     assert [a.attempt for a in result.attempts] == [1, 2]
     assert "compile failed" in diagnostics_seen[1]
     assert "attempt 1 build log" in diagnostics_seen[1]
+    assert "Recent harness attempt memory" in diagnostics_seen[1]
+    assert "attempt 1: build_failed" in diagnostics_seen[1]
     assert result.trace_records[0].observation["kind"] == "harness_build_failure"
     assert (
         AgentObservation.from_dict(result.trace_records[0].observation).kind

@@ -248,6 +248,8 @@ def _chat_session_json(session: ChatSession, *, include_history: bool = False) -
         "preview_role": preview_role,
         "active_campaign_id": session.active_campaign_id,
         "target_path": session.target_path,
+        "summary": session.summary,
+        "working_memory": session.working_memory,
         "turn_count": len(session.history),
         "created_at": session.created_at,
         "updated_at": session.updated_at,
