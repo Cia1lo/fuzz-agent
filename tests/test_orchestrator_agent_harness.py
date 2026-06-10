@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from fuzz_agent.agent_harness import HarnessBuildError
+from fuzz_agent.agent_harness import AgentHarnessResult, HarnessBuildError
 from fuzz_agent.events.stream import EventBus
 from fuzz_agent.hitl import AlwaysDeny
 from fuzz_agent.orchestrator import CampaignGoal, Orchestrator
@@ -180,3 +180,107 @@ def test_orchestrator_records_coverage_delta_trace(tmp_path):
     assert trace[-1]["score"]["edges_before"] == 13
     assert trace[-1]["score"]["edges_after"] == 21
     assert trace[-1]["score"]["target_reached"] is None
+
+
+def test_orchestrator_rebuilds_harness_from_plateau_input_model(
+    tmp_path,
+    monkeypatch,
+    make_stats,
+):
+    store = CampaignStore(tmp_path)
+    old_artifact = BuildArtifact(
+        binary_path=tmp_path / "old_fuzz",
+        engine=EngineKind.LIBFUZZER,
+        sanitizers=[],
+        build_log_path=tmp_path / "old_build.log",
+        harness_source_path=tmp_path / ".fuzz" / "harness" / "ParseThing" / "attempt_1.cc",
+    )
+    cfg = CampaignConfig(
+        artifact=old_artifact,
+        corpus_dir=tmp_path / "corpus",
+        crash_dir=tmp_path / "crashes",
+        dictionary_path=None,
+        time_budget_sec=10,
+    )
+    cid = store.new_campaign(cfg)
+    store.record_stats(make_stats(cid, edges_covered=13))
+    target = TargetProfile(
+        root=tmp_path,
+        language=Language.CPP,
+        entry_points=["ParseThing"],
+        build_system="cmake",
+    )
+    spec = HarnessSpec(
+        target=target,
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        source_path=old_artifact.harness_source_path,
+        attempt=1,
+    )
+    new_artifact = BuildArtifact(
+        binary_path=tmp_path / "new_fuzz",
+        engine=EngineKind.LIBFUZZER,
+        sanitizers=[],
+        build_log_path=tmp_path / "new_build.log",
+        harness_source_path=tmp_path / ".fuzz" / "harness" / "ParseThing" / "attempt_2.cc",
+    )
+
+    strategy = {
+        "dictionary_path": str(tmp_path / "extra.dict"),
+        "harness_modeling_hint": "Preserve magic bytes 'MAGI' before payload.",
+        "input_model_path": str(tmp_path / "input_model.json"),
+        "input_model": {"tokens": ["MAGI"], "fields": [{"name": "magic"}], "confidence": 0.8},
+        "added_seeds": [],
+        "dict_additions": ["MAGI"],
+    }
+    monkeypatch.setattr("fuzz_agent.orchestrator.tools.mutate_strategy", lambda *_args, **_kwargs: strategy)
+    monkeypatch.setattr("fuzz_agent.orchestrator.tools.stop_campaign", lambda *_: None)
+    monkeypatch.setattr("fuzz_agent.orchestrator.tools.start_fuzz_campaign", lambda *_args, **_kwargs: "nextcid")
+    orch = Orchestrator(store, EventBus())
+    orch._artifact = old_artifact
+    orch._harness_result = AgentHarnessResult(
+        spec=spec,
+        artifact=old_artifact,
+        attempts=[],
+        trace_records=[],
+    )
+
+    def fake_generate(target, entry, goal, *, attempt, diagnostics):
+        assert "MAGI" in diagnostics
+        source = tmp_path / ".fuzz" / "harness" / entry / f"attempt_{attempt}.cc"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("new harness", encoding="utf-8")
+        return HarnessSpec(
+            target=target,
+            entry=entry,
+            engine=goal.engine,
+            source_path=source,
+            attempt=attempt,
+        )
+
+    async def fake_build_with_retries(target, next_spec, goal, max_attempts=3):
+        del target, goal, max_attempts
+        orch._harness_result = AgentHarnessResult(
+            spec=next_spec,
+            artifact=new_artifact,
+            attempts=[],
+            trace_records=[],
+        )
+        return new_artifact
+
+    monkeypatch.setattr(orch, "_generate_harness", fake_generate)
+    monkeypatch.setattr(orch, "_build_with_retries", fake_build_with_retries)
+
+    asyncio.run(orch._on_plateau(
+        FuzzEvent(
+            kind=EventKind.PLATEAU,
+            campaign_id=cid,
+            ts=datetime.now(timezone.utc),
+            payload={"idle_sec": 1},
+        ),
+        CampaignGoal(target_path=tmp_path, time_budget_sec=10),
+    ))
+
+    trace = store.list_agent_trace(cid)
+    assert any(row["phase"] == "coverage_input_model" for row in trace)
+    assert orch._artifact == new_artifact

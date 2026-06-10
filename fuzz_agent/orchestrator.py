@@ -476,6 +476,7 @@ class Orchestrator:
             "edges_after": edges_before,
             "added_seed_count": len(strategy.get("added_seeds", []) or []),
             "dict_addition_count": len(strategy.get("dict_additions", []) or []),
+            "input_model_confidence": _input_model_confidence(strategy),
             "target_reached": None,
         }
         observation = AgentObservation(
@@ -504,6 +505,7 @@ class Orchestrator:
         if not allowed:
             return
         remaining = max(60, goal.time_budget_sec - stats.elapsed_sec)
+        await self._maybe_rebuild_harness_from_input_model(ev.campaign_id, goal, strategy)
         tools.stop_campaign(ev.campaign_id)
         if self._artifact is None:
             raise RuntimeError("cannot restart plateau campaign without build artifact")
@@ -520,6 +522,91 @@ class Orchestrator:
         self._active_cid = new_cid
         self.plateau = PlateauDetector(idle_sec=goal.coverage_plateau_sec)
         self.plateau.reset()
+
+    async def _maybe_rebuild_harness_from_input_model(
+        self,
+        cid: str,
+        goal: CampaignGoal,
+        strategy: dict[str, Any],
+    ) -> None:
+        hint = strategy.get("harness_modeling_hint")
+        if not isinstance(hint, str) or not hint.strip():
+            return
+        if self._harness_result is None:
+            return
+        current = self._harness_result.spec
+        diagnostics = _coverage_model_diagnostics(strategy)
+        try:
+            next_spec = self._generate_harness(
+                current.target,
+                current.entry,
+                goal,
+                attempt=current.attempt + 1,
+                diagnostics=diagnostics,
+            )
+            artifact = await self._build_with_retries(
+                current.target,
+                next_spec,
+                goal,
+                max_attempts=2,
+            )
+        except HarnessBuildError as exc:
+            for record in exc.trace_records:
+                self.store.record_agent_trace(cid, record)
+            self.store.record_event(FuzzEvent(
+                kind=EventKind.ENGINE_ERROR,
+                campaign_id=cid,
+                ts=datetime.now(timezone.utc),
+                payload={
+                    "coverage_input_model_rebuild_error": str(exc),
+                    "input_model_path": strategy.get("input_model_path"),
+                },
+            ))
+            return
+        except Exception as exc:  # noqa: BLE001
+            self.store.record_event(FuzzEvent(
+                kind=EventKind.ENGINE_ERROR,
+                campaign_id=cid,
+                ts=datetime.now(timezone.utc),
+                payload={
+                    "coverage_input_model_rebuild_error": f"{type(exc).__name__}: {exc}",
+                    "input_model_path": strategy.get("input_model_path"),
+                },
+            ))
+            return
+        self._artifact = artifact
+        self._engine = tools._runtime.runtime().engine(artifact.engine)
+        self.store.record_agent_trace(cid, {
+            "phase": "coverage_input_model",
+            "observation": {
+                "kind": "coverage_input_model",
+                "summary": "uncovered functions produced a harness input model",
+                "diagnostics": diagnostics,
+                "artifacts": {
+                    "input_model_path": strategy.get("input_model_path"),
+                    "harness_source_path": artifact.harness_source_path,
+                    "build_log_path": artifact.build_log_path,
+                },
+                "score": {
+                    "input_model_confidence": _input_model_confidence(strategy),
+                },
+            },
+            "decision": {
+                "action": "regenerate_harness",
+                "reason": "coverage plateau exposed uncovered functions with input-shape signals",
+            },
+            "action": {
+                "tool_chain": ["generate_harness", "build_target"],
+                "input_model_path": strategy.get("input_model_path"),
+            },
+            "result": {
+                "artifact_path": artifact.binary_path,
+                "harness_source_path": artifact.harness_source_path,
+            },
+            "score": {
+                "input_model_confidence": _input_model_confidence(strategy),
+            },
+        })
 
     async def _on_oom(self, ev: FuzzEvent, goal: CampaignGoal) -> None:
         return  # could lower memory cap or shrink seeds
@@ -550,3 +637,50 @@ def _read_crash_report(path: Path | None) -> str | None:
 def _event_edges(ev: FuzzEvent) -> int | None:
     value = ev.payload.get("edges")
     return value if isinstance(value, int) else None
+
+
+def _input_model_confidence(strategy: dict[str, Any]) -> float:
+    model = strategy.get("input_model")
+    if not isinstance(model, dict):
+        return 0.0
+    value = model.get("confidence")
+    if isinstance(value, (int, float)):
+        return float(value)
+    return 0.0
+
+
+def _coverage_model_diagnostics(strategy: dict[str, Any]) -> str:
+    lines = ["Coverage-guided harness input modeling request:"]
+    hint = strategy.get("harness_modeling_hint")
+    if isinstance(hint, str) and hint.strip():
+        lines.append(hint.strip())
+    input_model_path = strategy.get("input_model_path")
+    if input_model_path:
+        lines.append(f"Input model artifact: {input_model_path}")
+    model = strategy.get("input_model")
+    if isinstance(model, dict):
+        tokens = model.get("tokens")
+        if isinstance(tokens, list) and tokens:
+            lines.append("Important tokens/magic bytes: " + ", ".join(str(t) for t in tokens[:8]))
+        fields = model.get("fields")
+        if isinstance(fields, list) and fields:
+            field_names = [
+                str(field.get("name"))
+                for field in fields
+                if isinstance(field, dict) and field.get("name")
+            ]
+            if field_names:
+                lines.append("Suggested fields: " + ", ".join(dict.fromkeys(field_names)))
+        target_functions = model.get("target_functions")
+        if isinstance(target_functions, list) and target_functions:
+            funcs = [
+                str(row.get("func"))
+                for row in target_functions
+                if isinstance(row, dict) and row.get("func")
+            ]
+            if funcs:
+                lines.append("Prioritize reaching uncovered functions: " + ", ".join(funcs[:5]))
+    lines.append(
+        "Regenerate the harness so fuzz bytes are decoded into those fields before calling the target."
+    )
+    return "\n".join(lines)

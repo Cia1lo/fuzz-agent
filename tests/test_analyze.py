@@ -52,6 +52,35 @@ def test_analyze_cpp_detects_lowercase_and_byte_signature_entries(tmp_path):
     assert "DecodeGenerated" not in profile.entry_points
 
 
+def test_analyze_infers_language_from_sources_and_ranks_byte_entry(tmp_path):
+    (tmp_path / "parser.cc").write_text(
+        "int InitConfig() { return 0; }\n"
+        "int ProcessPacket(const char *data, unsigned long len) { return len > 0 && data[0]; }\n"
+        "int helper_no_input(int mode) { return mode; }\n",
+        encoding="utf-8",
+    )
+
+    profile = analyze_target(str(tmp_path))
+
+    assert profile.language is Language.CPP
+    assert profile.entry_points[0] == "ProcessPacket"
+    assert "helper_no_input" not in profile.entry_points
+
+
+def test_analyze_cpp_detects_generic_handle_buffer_entry(tmp_path):
+    (tmp_path / "CMakeLists.txt").write_text("project(demo)\n", encoding="utf-8")
+    (tmp_path / "codec.cc").write_text(
+        "bool HandleBuffer(std::string_view input) {\n"
+        "  return input.size() > 4;\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    profile = analyze_target(str(tmp_path))
+
+    assert "HandleBuffer" in profile.entry_points
+
+
 def test_analyze_empty_dir_unknown_with_no_entries(tmp_path):
     profile = analyze_target(str(tmp_path))
 
