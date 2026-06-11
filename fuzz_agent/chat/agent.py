@@ -1,6 +1,8 @@
 """Minimal conversational facade over the existing fuzz-agent tools."""
 from __future__ import annotations
 
+import base64
+import json
 import os
 import re
 import shlex
@@ -113,6 +115,10 @@ _CHAT_SYSTEM = """You are a concise assistant inside fuzz-agent, a fuzzing orche
 Answer normal conversation naturally, but keep users oriented toward available actions:
 analyze a target, run fuzzing, check status, stop/resume campaigns, inspect trace, and triage crashes.
 Do not claim that you executed a tool unless the user asked for a supported action."""
+
+_INLINE_ARTIFACT_FILE_LIMIT_BYTES = 8 * 1024
+_INLINE_BINARY_ARTIFACT_LIMIT_BYTES = 512
+_INLINE_ARTIFACT_TOTAL_LIMIT_BYTES = 32 * 1024
 
 
 @dataclass(frozen=True)
@@ -678,23 +684,26 @@ def _format_campaign_summary(summary: dict[str, Any]) -> str:
     has_crashes = bool(crashes) or unique_crashes > 0
     status = str(stats.get("status") or "unknown")
     lines = [
-        "结果",
         _campaign_result_sentence(str(cid), status, has_crashes, len(crashes) or unique_crashes),
-        "",
-        "概览",
-        *_campaign_overview_lines(str(cid), stats),
     ]
+    overview = _campaign_overview_sentence(str(cid), stats)
+    if overview:
+        lines.extend(["", overview])
     if crashes:
-        lines.extend(["", "Crash 证据", *_format_crash_summary(crashes, paths)])
+        lines.extend(["", *_format_crash_summary(crashes, paths)])
     elif unique_crashes > 0:
-        lines.extend([
-            "",
-            "Crash 证据",
-            "- 已记录 crash 计数，但当前 summary 中没有分诊记录。",
-            f"- crash dir: `{paths.get('crash_dir', '')}`",
-        ])
-    lines.extend(["", "Artifacts", *_artifact_lines(paths)])
-    lines.extend(["", "下一步", *_next_step_lines(str(cid), status, has_crashes)])
+        crash_dir = str(paths.get("crash_dir") or "")
+        detail = "系统记录到了 crash 计数，但这次 summary 没带回具体分诊记录。"
+        if crash_dir:
+            detail += f" crash 文件目录在 `{crash_dir}`。"
+        lines.extend(["", detail])
+    artifact_text = _artifact_sentence(paths, has_crashes=has_crashes)
+    if artifact_text:
+        lines.extend(["", artifact_text])
+    artifact_sections = _inline_artifact_sections(paths, crashes)
+    if artifact_sections:
+        lines.extend(["", "保存内容", *artifact_sections])
+    lines.extend(["", *_next_step_lines(str(cid), status, has_crashes)])
     return "\n".join(lines)
 
 
@@ -802,27 +811,27 @@ def _campaign_result_sentence(
     return f"Campaign `{cid}` 当前状态为 `{status}`，暂未发现 crash。"
 
 
-def _campaign_overview_lines(cid: str, stats: dict[str, Any]) -> list[str]:
-    lines = [
-        f"- campaign: `{cid}`",
-        f"- status: `{stats.get('status', 'unknown')}`",
-        f"- elapsed: {_int_value(stats.get('elapsed_sec'))}s",
-        f"- unique crashes: {_int_value(stats.get('unique_crashes'))}",
+def _campaign_overview_sentence(cid: str, stats: dict[str, Any]) -> str:
+    status = str(stats.get("status") or "unknown")
+    elapsed = _int_value(stats.get("elapsed_sec"))
+    unique_crashes = _int_value(stats.get("unique_crashes"))
+    details = [
+        f"运行约 {elapsed}s",
+        f"记录到 {unique_crashes} 个 unique crash",
     ]
-    optional_metrics = (
-        ("execs total", "execs_total"),
-        ("execs/sec", "execs_per_sec"),
-        ("edges covered", "edges_covered"),
-        ("corpus size", "corpus_size"),
-    )
-    for label, key in optional_metrics:
-        if key in stats and stats.get(key) is not None:
-            lines.append(f"- {label}: {stats.get(key)}")
-    return lines
+    if stats.get("execs_total") is not None:
+        details.append(f"执行了 {stats.get('execs_total')} 次")
+    if stats.get("execs_per_sec") is not None:
+        details.append(f"速度约 {stats.get('execs_per_sec')}/s")
+    if stats.get("edges_covered") is not None:
+        details.append(f"覆盖到 {stats.get('edges_covered')} 条边")
+    if stats.get("corpus_size") is not None:
+        details.append(f"corpus 中有 {stats.get('corpus_size')} 个输入")
+    return f"Campaign `{cid}` 的最终状态是 `{status}`；" + "，".join(details) + "。"
 
 
 def _format_crash_summary(crashes: list[dict[str, Any]], paths: dict[str, Any]) -> list[str]:
-    lines = [f"发现 {len(crashes)} 个 crash。"]
+    lines = [f"Crash 详情里带回了 {len(crashes)} 条记录。"]
     for idx, crash in enumerate(crashes[:5], start=1):
         crash_id = str(crash.get("crash_id") or "unknown")
         status = str(crash.get("status") or "unknown")
@@ -830,62 +839,246 @@ def _format_crash_summary(crashes: list[dict[str, Any]], paths: dict[str, Any]) 
         input_path = str(crash.get("input_path") or "")
         minimized_path = str(crash.get("minimized_path") or "")
         reproduce_log = str(crash.get("reproduce_log_path") or "")
-        lines.append(f"{idx}. `{crash_id}` status={status} kind={kind}")
+        lines.append(
+            f"{idx}. Crash `{crash_id}` 当前是 `{status}`，sanitizer kind 是 `{kind}`。"
+        )
         if input_path:
-            lines.append(f"  input: `{input_path}`")
+            lines.append(f"   触发输入保存在 `{input_path}`。")
             preview = _input_preview(Path(input_path))
             if preview:
-                lines.append(f"  input preview: `{preview}`")
+                lines.append(f"   输入预览是 `{preview}`。")
         if minimized_path:
-            lines.append(f"  minimized: `{minimized_path}`")
+            lines.append(f"   最小化后的输入在 `{minimized_path}`。")
         if reproduce_log:
-            lines.append(f"  reproduce log: `{reproduce_log}`")
+            lines.append(f"   复现日志在 `{reproduce_log}`。")
         frame = _first_frame(crash)
         if frame:
-            lines.append(f"  top frame: {frame}")
+            lines.append(f"   栈顶证据指向 {frame}。")
         matches = _vulnerability_matches(crash)
         if matches:
-            lines.append(f"  match: {matches[0]}")
+            lines.append(f"   规则匹配结果是 {matches[0]}。")
     if len(crashes) > 5:
-        lines.append(f"- 还有 {len(crashes) - 5} 个 crash 未展示")
+        lines.append(f"还有 {len(crashes) - 5} 个 crash 没有在这条回复里展开。")
     crash_dir = str(paths.get("crash_dir") or "")
     if crash_dir:
-        lines.append(f"crash dir: `{crash_dir}`")
+        lines.append(f"完整 crash 目录在 `{crash_dir}`。")
     return lines
 
 
-def _artifact_lines(paths: dict[str, Any]) -> list[str]:
+def _artifact_sentence(paths: dict[str, Any], *, has_crashes: bool) -> str:
     labels = (
-        ("agent trace", "agent_trace"),
         ("run log", "run_log"),
-        ("build log", "build_log"),
-        ("harness", "harness"),
+        ("agent trace", "agent_trace"),
         ("coverage summary", "coverage_summary"),
-        ("coverage uncovered", "coverage_uncovered"),
-        ("crash dir", "crash_dir"),
     )
-    lines = [
-        f"- {label}: `{paths[key]}`"
-        for label, key in labels
-        if paths.get(key)
+    parts: list[str] = []
+    for label, key in labels:
+        path = _path_or_none(paths.get(key))
+        if path is not None and path.is_file():
+            parts.append(f"{label} 在 `{path}`")
+    crash_dir = _path_or_none(paths.get("crash_dir"))
+    if has_crashes and crash_dir is not None and crash_dir.is_dir():
+        parts.append(f"crash 目录在 `{crash_dir}`")
+    if not parts:
+        return ""
+    return "关键证据文件已经保存：" + "；".join(parts) + "。"
+
+
+def _inline_artifact_sections(
+    paths: dict[str, Any],
+    crashes: list[dict[str, Any]],
+) -> list[str]:
+    candidates = _inline_artifact_candidates(paths, crashes)
+    if not candidates:
+        return []
+    lines = [(
+        "下面直接展示较小的本地 artifact；超过 "
+        f"{_INLINE_ARTIFACT_FILE_LIMIT_BYTES} bytes 的文本文件会省略，"
+        f"二进制文件超过 {_INLINE_BINARY_ARTIFACT_LIMIT_BYTES} bytes 会省略。"
+    )]
+    remaining = _INLINE_ARTIFACT_TOTAL_LIMIT_BYTES
+    seen: set[Path] = set()
+    for label, path, binary in candidates:
+        resolved = path.expanduser()
+        try:
+            key = resolved.resolve()
+        except OSError:
+            key = resolved
+        if key in seen:
+            continue
+        seen.add(key)
+        section, used = _inline_file_section(
+            label,
+            resolved,
+            binary=binary,
+            remaining_bytes=remaining,
+        )
+        if section:
+            lines.extend(["", *section])
+        remaining = max(0, remaining - used)
+    return lines if len(lines) > 1 else []
+
+
+def _inline_artifact_candidates(
+    paths: dict[str, Any],
+    crashes: list[dict[str, Any]],
+) -> list[tuple[str, Path, bool]]:
+    candidates: list[tuple[str, Path, bool]] = []
+    for crash in crashes[:5]:
+        crash_id = str(crash.get("crash_id") or "unknown")
+        _append_path_candidate(candidates, f"crash input `{crash_id}`", crash.get("input_path"), binary=True)
+        _append_path_candidate(
+            candidates,
+            f"minimized crash input `{crash_id}`",
+            crash.get("minimized_path"),
+            binary=True,
+        )
+        _append_path_candidate(candidates, f"reproduce log `{crash_id}`", crash.get("reproduce_log_path"))
+
+    _append_path_candidate(candidates, "run log", paths.get("run_log"))
+    _append_path_candidate(candidates, "coverage summary", paths.get("coverage_summary"))
+    _append_path_candidate(candidates, "coverage uncovered JSON", paths.get("coverage_uncovered"))
+    _append_path_candidate(candidates, "agent trace JSONL", paths.get("agent_trace"))
+    _append_path_candidate(candidates, "events JSONL", paths.get("events_log"))
+    _append_path_candidate(candidates, "campaign meta JSON", paths.get("meta"))
+
+    for label, value in _artifact_paths_from_meta(paths.get("meta")):
+        _append_path_candidate(candidates, label, value)
+    base = _path_or_none(paths.get("base"))
+    if base is not None:
+        for name, label in (
+            ("input_model.json", "input model JSON"),
+            ("extra.dict", "coverage dictionary"),
+        ):
+            path = base / name
+            if path.exists():
+                candidates.append((label, path, False))
+    return candidates
+
+
+def _append_path_candidate(
+    candidates: list[tuple[str, Path, bool]],
+    label: str,
+    value: Any,
+    *,
+    binary: bool = False,
+) -> None:
+    path = _path_or_none(value)
+    if path is None or not path.exists():
+        return
+    candidates.append((label, path, binary))
+
+
+def _artifact_paths_from_meta(meta_value: Any) -> list[tuple[str, Path]]:
+    meta_path = _path_or_none(meta_value)
+    if meta_path is None or not meta_path.is_file():
+        return []
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    artifact = payload.get("artifact") if isinstance(payload, dict) else None
+    if not isinstance(artifact, dict):
+        return []
+    out: list[tuple[str, Path]] = []
+    build_log = _path_or_none(artifact.get("build_log_path"))
+    if build_log is not None:
+        out.append(("build log", build_log))
+    harness = _path_or_none(artifact.get("harness_source_path"))
+    if harness is not None:
+        out.append(("harness source", harness))
+    return out
+
+
+def _path_or_none(value: Any) -> Path | None:
+    if isinstance(value, Path):
+        return value
+    if isinstance(value, str) and value:
+        return Path(value)
+    return None
+
+
+def _inline_file_section(
+    label: str,
+    path: Path,
+    *,
+    binary: bool,
+    remaining_bytes: int,
+) -> tuple[list[str], int]:
+    if not path.exists():
+        return ([f"{label} `{path}` 未找到，无法内联。"], 0)
+    if not path.is_file():
+        return ([], 0)
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        return ([f"{label} `{path}` 无法读取大小：{exc}。"], 0)
+    limit = (
+        _INLINE_BINARY_ARTIFACT_LIMIT_BYTES
+        if binary
+        else _INLINE_ARTIFACT_FILE_LIMIT_BYTES
+    )
+    if size > limit:
+        return ([f"{label} `{path}` 大小为 {size} bytes，超过 {limit} bytes，已省略。"], 0)
+    if size > remaining_bytes:
+        return ([f"{label} `{path}` 因本条回复 artifact 展示预算不足，已省略。"], 0)
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        return ([f"{label} `{path}` 读取失败：{exc}。"], 0)
+    if binary or _looks_binary(data):
+        return (_binary_file_section(label, path, data), size)
+    text = data.decode("utf-8", errors="replace")
+    return (_text_file_section(label, path, text), size)
+
+
+def _text_file_section(label: str, path: Path, text: str) -> list[str]:
+    return [
+        f"{label} `{path}`：",
+        *_fenced_lines("text", text if text else "<empty>"),
     ]
-    return lines or ["- 当前 summary 未提供 artifact 路径。"]
+
+
+def _binary_file_section(label: str, path: Path, data: bytes) -> list[str]:
+    encoded = base64.b64encode(data).decode("ascii")
+    return [
+        f"{label} `{path}`（{len(data)} bytes，按二进制展示）：",
+        *_fenced_lines("hex", data.hex(" ") if data else "<empty>"),
+        f"base64: `{encoded}`",
+    ]
+
+
+def _fenced_lines(language: str, text: str) -> list[str]:
+    fence = "```"
+    while fence in text:
+        fence += "`"
+    return [f"{fence}{language}", text.rstrip("\n"), fence]
+
+
+def _looks_binary(data: bytes) -> bool:
+    if b"\x00" in data:
+        return True
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 def _next_step_lines(cid: str, status: str, has_crashes: bool) -> list[str]:
     if has_crashes:
         return [
-            f"- 输入 `triage {cid}` 查看或刷新 crash 分诊结果。",
-            f"- 打开 `/campaigns/{cid}` 查看 run log、harness、crash artifact 和 agent trace。",
+            f"下一步可以输入 `triage {cid}` 查看或刷新 crash 分诊结果。",
+            f"如果上面有过大的 artifact 被省略，完整视图仍在 `/campaigns/{cid}`。",
         ]
     if status == "failed":
         return [
-            "- 优先查看 run log 和 agent trace，确认是引擎错误、环境问题还是目标程序异常退出。",
-            f"- 打开 `/campaigns/{cid}` 查看完整 artifact。",
+            "下一步优先看 run log 和 agent trace，确认是引擎错误、环境问题还是目标程序异常退出。",
+            f"如果上面有过大的 artifact 被省略，完整视图仍在 `/campaigns/{cid}`。",
         ]
     return [
-        "- 可以延长运行时间继续探索，或查看 coverage 结果寻找未覆盖路径。",
-        f"- 打开 `/campaigns/{cid}` 查看完整 artifact。",
+        "下一步可以延长运行时间继续探索，或查看 coverage 结果寻找未覆盖路径。",
+        f"如果上面有过大的 artifact 被省略，完整视图仍在 `/campaigns/{cid}`。",
     ]
 
 

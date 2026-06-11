@@ -154,9 +154,8 @@ def test_chat_run_parses_chinese_freeform_without_spaces(tmp_path, monkeypatch):
 
     reply = asyncio.run(agent.respond(session, "对demo_targets/real_target_crash进行fuzz测试一分钟"))
 
-    assert "结果" in reply
-    assert "概览" in reply
-    assert "- campaign: `cid123`" in reply
+    assert "Campaign `cid123` 的最终状态是 `finished`" in reply
+    assert "运行约 60s" in reply
     assert "本次 fuzz 已完成，暂未发现 crash。" in reply
     assert len(captured_goals) == 1
     assert captured_goals[0].target_path == target.resolve()
@@ -188,9 +187,8 @@ def test_chat_run_reuses_target_for_chinese_duration(tmp_path, monkeypatch):
 
     reply = asyncio.run(agent.respond(session, "跑半分钟"))
 
-    assert "结果" in reply
-    assert "概览" in reply
-    assert "- campaign: `cid456`" in reply
+    assert "Campaign `cid456` 的最终状态是 `finished`" in reply
+    assert "运行约 30s" in reply
     assert "本次 fuzz 已完成，暂未发现 crash。" in reply
     assert len(captured_goals) == 1
     assert captured_goals[0].target_path == tmp_path.resolve()
@@ -241,10 +239,42 @@ def test_chat_run_summary_includes_crash_details(tmp_path, monkeypatch):
 
     assert "发现 1 个 crash" in reply
     assert "`abc`" in reply
-    assert "input preview: `BUG!`" in reply
-    assert "reproduce log:" in reply
+    assert "输入预览是 `BUG!`" in reply
+    assert "复现日志在" in reply
     assert "ParseThing parser.cc:10" in reply
     assert "Null pointer dereference (CWE-476)" in reply
+    assert "保存内容" in reply
+    assert "crash input `abc`" in reply
+    assert "42 55 47 21" in reply
+    assert "base64: `QlVHIQ==`" in reply
+    assert "SUMMARY: AddressSanitizer" in reply
+
+
+def test_chat_run_summary_omits_large_artifact_contents(tmp_path, monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    run_log = tmp_path / "run.log"
+    run_log.write_text("A" * 9000, encoding="utf-8")
+
+    async def fake_run(self, goal):
+        return {
+            "campaign_id": "cid-large",
+            "stats": {
+                "status": "finished",
+                "elapsed_sec": 1,
+                "unique_crashes": 0,
+            },
+            "paths": {"run_log": str(run_log)},
+        }
+
+    monkeypatch.setattr("fuzz_agent.chat.agent.Orchestrator.run", fake_run)
+    session = ChatSession(target_path=str(tmp_path))
+    agent = ConversationAgent(CampaignStore(tmp_path), EventBus())
+
+    reply = asyncio.run(agent.respond(session, "run 1s"))
+
+    assert "run log" in reply
+    assert "超过 8192 bytes，已省略" in reply
+    assert "AAAAA" not in reply
 
 
 def test_chat_llm_intent_can_parse_freeform_analyze(tmp_path, monkeypatch):

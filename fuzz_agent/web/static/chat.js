@@ -241,14 +241,14 @@
     if (lower.startsWith("failed:") || lower.includes("error") || text.includes("异常")) {
       return "error";
     }
-    if (text.includes("状态:") || lower.includes("unique crashes:")) {
-      return "status";
-    }
     if (lower.includes("agent trace") || text.includes("诊断:")) {
       return "trace";
     }
-    if (lower.includes("crash") || text.includes("Crash 证据") || text.includes("分诊")) {
+    if (/发现\s*[1-9]\d*\s*个 crash/i.test(text) || text.includes("Crash 详情") || text.includes("Crash 证据") || text.includes("分诊")) {
       return "crash";
+    }
+    if (text.includes("状态:") || text.includes("最终状态是") || lower.includes("unique crashes:")) {
+      return "status";
     }
     return "plain";
   }
@@ -264,14 +264,14 @@
     card.appendChild(head);
     if (kind === "status") {
       card.appendChild(metricGrid([
-        ["status", matchValue(text, /状态:\s*([^\n]+)/)],
-        ["speed", matchValue(text, /速度:\s*([^\n]+)/)],
-        ["edges", matchValue(text, /覆盖边:\s*([^\n]+)/)],
-        ["crashes", matchValue(text, /unique crashes:\s*([^\n]+)/i)],
+        ["status", matchValue(text, /状态:\s*([^\n]+)/) || matchValue(text, /最终状态是 `([^`]+)`/)],
+        ["speed", matchValue(text, /速度:\s*([^\n]+)/) || matchValue(text, /速度约 ([^，。]+)/)],
+        ["edges", matchValue(text, /覆盖边:\s*([^\n]+)/) || matchValue(text, /覆盖到 ([^，。]+)/)],
+        ["crashes", matchValue(text, /unique crashes:\s*([^\n]+)/i) || matchValue(text, /记录到 ([^，。]*unique crash)/i)],
       ]));
     } else if (kind === "crash") {
       card.appendChild(metricGrid([
-        ["results", matchValue(text, /共\s*(\d+)\s*个结果/) || matchValue(text, /发现\s*(\d+)\s*个 crash/i)],
+        ["results", matchValue(text, /共\s*(\d+)\s*个结果/) || matchValue(text, /发现\s*(\d+)\s*个 crash/i) || matchValue(text, /带回了\s*(\d+)\s*条记录/)],
         ["status", text.includes("没有可展示") ? "none" : "review"],
       ]));
     } else if (kind === "trace") {
