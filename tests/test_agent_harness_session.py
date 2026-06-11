@@ -19,6 +19,7 @@ from fuzz_agent.agent_harness import (
     agent_observation_to_dict,
 )
 from fuzz_agent.agent_harness.validators import (
+    classify_build_failure,
     validate_crash_not_from_harness,
     validate_target_reached_by_artifact,
     validate_target_referenced_by_harness,
@@ -165,6 +166,57 @@ def test_agent_harness_session_classifies_build_failure(tmp_path):
     failure = exc.value.trace_records[0].observation["raw"]["build_failure"]
     assert failure["kind"] == "missing_include"
     assert failure["symbol"] == "parser.h"
+
+
+def test_agent_harness_session_stops_on_missing_fuzzer_runtime(tmp_path):
+    target = _target(tmp_path)
+    build_calls = 0
+
+    def generate(attempt: int, diagnostics: str | None) -> HarnessSpec:
+        return _spec(target, attempt)
+
+    async def build(spec: HarnessSpec) -> BuildArtifact:
+        nonlocal build_calls
+        build_calls += 1
+        out_dir = spec.target.root / ".fuzz" / "build"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        log = out_dir / f"build_{spec.entry}_attempt_{spec.attempt}.log"
+        log.write_text(
+            "ld: library "
+            "'/Library/Developer/CommandLineTools/usr/lib/clang/17/lib/darwin/"
+            "libclang_rt.fuzzer_osx.a' not found\n",
+            encoding="utf-8",
+        )
+        raise RuntimeError("libFuzzer build failed")
+
+    session = AgentHarnessSession(
+        target=target,
+        entry="ParseThing",
+        engine=EngineKind.LIBFUZZER,
+        invariants=[],
+        generate_harness=generate,
+        build=build,
+        max_attempts=3,
+    )
+
+    with pytest.raises(HarnessBuildError) as exc:
+        asyncio.run(session.run())
+
+    assert build_calls == 1
+    assert len(exc.value.attempts) == 1
+    record = exc.value.trace_records[0]
+    assert record.observation["raw"]["build_failure"]["kind"] == "missing_fuzzer_runtime"
+    assert record.decision["action"] is HarnessAction.STOP_FAILED
+    assert "non-retryable build failure" in record.decision["reason"]
+
+
+def test_classify_build_failure_identifies_libfuzzer_toolchain_errors():
+    failure = classify_build_failure(
+        "ld: library '/path/libclang_rt.fuzzer_osx.a' not found"
+    )
+
+    assert failure["kind"] == "missing_fuzzer_runtime"
+    assert "libFuzzer runtime" in failure["hint"]
 
 
 def test_agent_harness_session_applies_patch_harness_action(tmp_path):

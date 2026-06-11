@@ -15,6 +15,12 @@ from .observation import (
     observation_source_path,
 )
 
+_TERMINAL_BUILD_FAILURE_KINDS = {
+    "missing_fuzzer_runtime",
+    "unsupported_fuzzer_sanitizer",
+    "missing_target_source",
+}
+
 
 class HarnessAction(str, Enum):
     ACCEPT_HARNESS = "accept_harness"
@@ -48,6 +54,9 @@ class HarnessPolicy:
                 action=HarnessAction.ACCEPT_HARNESS,
                 reason="all validations passed",
             )
+        terminal = _terminal_build_failure_decision(observation)
+        if terminal is not None:
+            return terminal
         if attempt >= max_attempts:
             return HarnessDecision(
                 action=HarnessAction.STOP_FAILED,
@@ -103,6 +112,9 @@ Do not include prose or markdown."""
                 action=HarnessAction.ACCEPT_HARNESS,
                 reason="all validations passed",
             )
+        terminal = _terminal_build_failure_decision(observation)
+        if terminal is not None:
+            return terminal
         if attempt >= max_attempts:
             return HarnessDecision(
                 action=HarnessAction.STOP_FAILED,
@@ -194,6 +206,30 @@ def _validate_payload(
         if payload and not isinstance(payload, dict):
             raise ValueError("payload must be an object")
     return payload
+
+
+def _terminal_build_failure_decision(
+    observation: AgentObservation | HarnessAttemptObservation,
+) -> HarnessDecision | None:
+    build_failure = _build_failure_dict(observation)
+    kind = build_failure.get("kind")
+    if kind not in _TERMINAL_BUILD_FAILURE_KINDS:
+        return None
+    hint = build_failure.get("hint") or "fix the build environment before retrying"
+    return HarnessDecision(
+        action=HarnessAction.STOP_FAILED,
+        reason=f"non-retryable build failure: {kind}; {hint}",
+        payload={"build_failure": build_failure},
+    )
+
+
+def _build_failure_dict(
+    observation: AgentObservation | HarnessAttemptObservation,
+) -> dict[str, str]:
+    if isinstance(observation, HarnessAttemptObservation):
+        return observation.build_failure
+    raw = observation.raw.get("build_failure") if isinstance(observation.raw, dict) else None
+    return raw if isinstance(raw, dict) else {}
 
 
 def _observation_prompt(

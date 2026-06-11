@@ -27,3 +27,6 @@ WEB_UI_TODO.md
 
 # macOS Finder metadata.
 .DS_Store
+
+# Local screenshots.
+Snipaste_*.png

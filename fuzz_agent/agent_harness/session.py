@@ -214,7 +214,7 @@ class AgentHarnessSession:
             diagnostics=diagnostics,
             validations=validations,
             score=score,
-            build_failure=classify_build_failure(_build_log_tail(self._expected_build_log(spec))),
+            build_failure=classify_build_failure(diagnostics),
         )
         self.attempts.append(observation)
         return observation

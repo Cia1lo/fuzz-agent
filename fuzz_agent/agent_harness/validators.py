@@ -16,6 +16,26 @@ _BUILD_FAILURE_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("undefined_symbol", re.compile(r"undefined (?:reference|symbol).*?(?P<symbol>[A-Za-z_]\w*)")),
     ("signature_mismatch", re.compile(r"(?:no matching function|too (?:few|many) arguments|cannot convert)")),
     ("missing_type", re.compile(r"(?:unknown type name|does not name a type) ['`]?(?P<symbol>[A-Za-z_]\w*)")),
+    (
+        "missing_fuzzer_runtime",
+        re.compile(
+            r"(?:libclang_rt\.fuzzer[\w_.-]*\.a.*not found|"
+            r"cannot find .*libclang_rt\.fuzzer|"
+            r"unable to find library.*(?:clang_rt\.)?fuzzer)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "unsupported_fuzzer_sanitizer",
+        re.compile(r"unsupported (?:argument|option).*fuzzer", re.IGNORECASE),
+    ),
+    (
+        "missing_target_source",
+        re.compile(
+            r"LibFuzzer build needs at least one target source file",
+            re.IGNORECASE,
+        ),
+    ),
 )
 
 
@@ -98,6 +118,15 @@ def _build_failure_hint(kind: str, symbol: str) -> str:
         return "adjust harness call to the target function signature"
     if kind == "missing_type":
         return f"include declaration for type {symbol}" if symbol else "include missing type declaration"
+    if kind == "missing_fuzzer_runtime":
+        return (
+            "install a clang toolchain with the libFuzzer runtime or set CC/CXX to one "
+            "that provides it, such as Homebrew LLVM on macOS"
+        )
+    if kind == "unsupported_fuzzer_sanitizer":
+        return "use a clang build that supports -fsanitize=fuzzer"
+    if kind == "missing_target_source":
+        return "populate HarnessSpec.extra_sources with target source files before building"
     return "inspect build log tail"
 
 

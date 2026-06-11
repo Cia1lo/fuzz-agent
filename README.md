@@ -1,5 +1,7 @@
 # fuzz-agent
 
+## 项目简介
+
 `fuzz-agent` 是一个面向 harness engineering 的 fuzz 编排器。它通过
 OpenAI-compatible LLM 生成和修复 fuzz harness，但关键判断依赖可验证的工程反馈：
 目标分析、构建日志、fuzz 引擎事件、coverage、crash artifact、reproduce 结果和
@@ -9,28 +11,10 @@ OpenAI-compatible LLM 生成和修复 fuzz harness，但关键判断依赖可验
 adapter，但整体仍偏早期。AFL++、Jazzer、Go native fuzz 目前主要是枚举和规划层面的
 占位。
 
-## 当前进度
+项目目标不是替代 fuzz engine，而是把目标分析、harness 生成、构建验证、运行监督、
+coverage 反馈、crash 复现分诊和产物持久化串成可恢复的工程闭环。
 
-| 能力 | 状态 |
-| --- | --- |
-| C/C++ target 分析与 LibFuzzer harness 生成 | 已实现 |
-| LibFuzzer build/run/reproduce/minimize | 已实现 |
-| Rust target 分析与 cargo-fuzz harness 生成 | 已实现 |
-| cargo-fuzz build/run/reproduce/minimize | 已实现 |
-| Python Atheris adapter | 实验性：import check、run、reproduce/minimize 基础路径 |
-| Agent harness 生成/构建/验证/重试 trace | 已实现 |
-| Campaign background run、resume、stop、status | 已实现 |
-| EventBus heartbeat/new coverage/new crash/plateau 事件 | 已实现 |
-| LibFuzzer coverage summary/uncovered function 输出 | 已实现 |
-| Coverage plateau 后的 seed/dictionary 策略变异 | 已实现 |
-| Crash reproduce、去重、confirmed/non-reproducible/flaky 状态 | 已实现 |
-| 漏洞类型/CWE 匹配和自定义规则 | 已实现 |
-| CLI 与规则优先 Chat facade | 已实现 |
-| Web UI campaign/artifact/chat 工作台 | 已实现 |
-| Web SSE events 和 chat streaming | 已实现 |
-| Web 默认 local-only 访问保护 | 已实现 |
-| Docker/nsjail sandbox provider | 已实现基础包装 |
-| AFL++、Jazzer、Go native fuzz | 暂未真正接入 |
+
 
 ## 架构
 
@@ -75,16 +59,39 @@ Engine adapters       Subagents             CampaignStore
 policy decision`，并把每次 attempt 写入结构化 trace。`harness_writer` 生成的是内层
 fuzz harness，即把 fuzz bytes 接到目标函数的适配代码。
 
-## 安装
+## 项目环境
+
+本项目以 `uv` 管理本地 Python 环境和依赖锁定。建议所有本地启动、Web UI、Chat 和开发验证
+都通过 `uv run` 执行，避免绕过 `uv.lock`。
+
+基础要求：
+
+- Python `>=3.11`
+- `uv`
+- 按实际 fuzz engine 安装对应外部工具
+
+同步基础依赖：
 
 ```bash
-pip install -e .
+uv sync
 ```
 
-开发和 Web UI 依赖：
+同步 Web UI 依赖：
 
 ```bash
-pip install -e ".[dev,web]"
+uv sync --extra web
+```
+
+同步开发和 Web UI 全量依赖：
+
+```bash
+uv sync --all-extras
+```
+
+确认 CLI 可用：
+
+```bash
+uv run fuzz-agent --help
 ```
 
 LLM 配置使用 OpenAI-compatible 接口：
@@ -109,42 +116,42 @@ export FUZZ_AGENT_MODEL=gpt-4o-mini
 C/C++ LibFuzzer：
 
 ```bash
-fuzz-agent analyze ./my-cpp-target
-fuzz-agent run ./my-cpp-target --engine libfuzzer --time 30m
+uv run fuzz-agent analyze ./my-cpp-target
+uv run fuzz-agent run ./my-cpp-target --engine libfuzzer --time 30m
 ```
 
 Rust cargo-fuzz：
 
 ```bash
-fuzz-agent analyze ./my-rust-crate
-fuzz-agent run ./my-rust-crate --engine cargo-fuzz --time 30m
+uv run fuzz-agent analyze ./my-rust-crate
+uv run fuzz-agent run ./my-rust-crate --engine cargo-fuzz --time 30m
 ```
 
 查看状态、分诊和恢复：
 
 ```bash
-fuzz-agent status <campaign_id>
-fuzz-agent triage <campaign_id>
-fuzz-agent resume <campaign_id> --time 30m
+uv run fuzz-agent status <campaign_id>
+uv run fuzz-agent triage <campaign_id>
+uv run fuzz-agent resume <campaign_id> --time 30m
 ```
 
 常用 run 选项：
 
 ```bash
-fuzz-agent run ./target --engine libfuzzer --time 30m --max-crashes 50 --plateau 300
-fuzz-agent run ./target --engine libfuzzer --time 30m --no-triage
+uv run fuzz-agent run ./target --engine libfuzzer --time 30m --max-crashes 50 --plateau 300
+uv run fuzz-agent run ./target --engine libfuzzer --time 30m --no-triage
 ```
 
 启动 Web UI：
 
 ```bash
-fuzz-agent serve --host 127.0.0.1 --port 8000
+uv run fuzz-agent serve --host 127.0.0.1 --port 8000
 ```
 
 启动 CLI Chat：
 
 ```bash
-fuzz-agent chat
+uv run fuzz-agent chat
 ```
 
 Chat 支持规则优先命令：
@@ -256,7 +263,27 @@ analyze -> generate harness -> build -> validate -> smoke run -> start campaign
 
 停止条件包括时间预算耗尽、campaign 状态变为 stopped/failed、unique crashes 达到上限。
 
-## 产物位置
+## 产物标注
+
+`fuzz-agent` 的运行产物默认保存在本地工作目录和目标项目的 `.fuzz/` 目录中。核心产物按用途
+标注如下：
+
+| 标注 | 路径 | 说明 |
+| --- | --- | --- |
+| 状态数据库 | `state/state.db` | SQLite 状态库，保存 campaign、stats、events、crashes 和 chat session。 |
+| campaign 元数据 | `state/campaigns/<campaign_id>/meta.json` | 单次 campaign 的配置、artifact 引用和生命周期信息。 |
+| 事件日志 | `state/campaigns/<campaign_id>/events.jsonl` | heartbeat、new coverage、new crash、plateau、OOM、engine error 等事件。 |
+| 引擎运行日志 | `state/campaigns/<campaign_id>/run.log` | fuzz engine 标准输出和错误输出的持久化记录。 |
+| corpus | `state/campaigns/<campaign_id>/corpus/` | 当前 campaign 使用和增长的输入语料。 |
+| crash artifact | `state/campaigns/<campaign_id>/crashes/` | fuzz engine 发现的 crash 输入和相关复现材料。 |
+| coverage summary | `state/campaigns/<campaign_id>/coverage_summary.txt` | LibFuzzer coverage 的文本摘要。 |
+| uncovered functions | `state/campaigns/<campaign_id>/coverage_uncovered.json` | 未覆盖函数和策略变异输入。 |
+| input model | `state/campaigns/<campaign_id>/input_model.json` | coverage plateau 后推断出的 magic、字段、token 和 seed 模板。 |
+| agent trace | `state/campaigns/<campaign_id>/agent_trace.jsonl` | harness 生成、构建、验证、策略决策和重试 trace。 |
+| pre-campaign trace | `state/agent_sessions/<session_id>/agent_trace.jsonl` | campaign 创建前全部构建失败时保留的 agent trace。 |
+| generated harness | `<target>/.fuzz/harness/<entry>/attempt_N.*` | LLM 或 fallback 生成的 harness 源码与 dictionary。 |
+| build artifact | `<target>/.fuzz/build/fuzz_<entry>_attempt_N` | LibFuzzer 等 engine 构建出的 fuzz binary。 |
+| build log | `<target>/.fuzz/build/build_<entry>_attempt_N.log` | harness 构建日志，用于修复和审计。 |
 
 默认状态目录在当前工作目录：
 
@@ -347,9 +374,9 @@ export FUZZ_AGENT_HITL=cli
 ## 开发验证
 
 ```bash
-ruff check fuzz_agent tests
-mypy fuzz_agent
-pytest -q
+uv run ruff check fuzz_agent tests
+uv run mypy fuzz_agent
+uv run pytest -q
 ```
 
 当前测试覆盖重点：
@@ -365,16 +392,3 @@ pytest -q
 - EventBus 和 plateau 事件。
 - Web API、artifact endpoint、local-only middleware、chat session 持久化。
 - Chat rule/LLM intent 解析。
-
-## 当前限制
-
-- LibFuzzer 只支持 C/C++，且构建依赖 `HarnessSpec.extra_sources` 和本地 `clang`。
-- target analyze 和入口点发现是正则启发式，不是完整语义分析。
-- cargo-fuzz 需要目标路径是具体 Rust package；纯 workspace root 需要先选择实际 crate。
-- cargo-fuzz coverage 尚未完善，结构化 coverage 主要是 LibFuzzer 路径。
-- Atheris adapter 存在，但不是当前最成熟路径；使用前需要补齐实际 Python harness 生成和
-  验证细节。
-- AFL++、Jazzer、Go native fuzz 尚未真正接入。
-- 默认 `FUZZ_AGENT_SANDBOX=none` 无隔离，只适合本地可信目标。
-- LLM 输出经过 JSON 解析和部分 payload 验证，但真正文件写入仍应通过工具层控制。
-- Web 默认 local-only；不要在未配置认证/隔离前直接暴露到公网。
