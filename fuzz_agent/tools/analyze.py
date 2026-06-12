@@ -10,7 +10,6 @@ from ..state.models import Language, TargetProfile
 _LANG_HINTS = {
     Language.RUST: ("Cargo.toml",),
     Language.GO: ("go.mod",),
-    Language.PYTHON: ("pyproject.toml", "setup.py"),
     Language.JAVA: ("pom.xml", "build.gradle", "build.gradle.kts"),
     Language.CPP: ("CMakeLists.txt",),
     Language.C: ("Makefile",),
@@ -19,7 +18,6 @@ _LANG_HINTS = {
 _BUILD = {
     Language.RUST: "cargo",
     Language.GO: "go",
-    Language.PYTHON: "pip",
     Language.JAVA: "maven",
     Language.CPP: "cmake",
     Language.C: "make",
@@ -46,10 +44,6 @@ _ENTRY_RE = {
         r"(parse_\w+|decode_\w+|from_bytes\w*|read_\w+|load_\w+)\s*\(",
         re.MULTILINE,
     ),
-    Language.PYTHON: re.compile(
-        r"^\s*def\s+(parse_\w+|decode_\w+|loads?|read_\w+|load_\w+)\s*\(",
-        re.MULTILINE,
-    ),
     Language.JAVA: re.compile(
         r"^\s*(?:public|protected|private|static|\s)+[\w<>\[\]]+\s+"
         r"(parse\w+|decode\w+|deserialize\w+|read\w+|load\w+)\s*\(",
@@ -64,7 +58,6 @@ _SOURCE_EXTS = {
     Language.CPP: {".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx"},
     Language.RUST: {".rs"},
     Language.GO: {".go"},
-    Language.PYTHON: {".py"},
     Language.JAVA: {".java"},
 }
 _BYTE_SIGNATURE_RE = re.compile(

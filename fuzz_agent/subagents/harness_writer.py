@@ -12,7 +12,6 @@ _EXT = {
     EngineKind.LIBFUZZER: "cc",
     EngineKind.CARGO_FUZZ: "rs",
     EngineKind.AFLPP: "c",
-    EngineKind.ATHERIS: "py",
     EngineKind.JAZZER: "java",
     EngineKind.GO_NATIVE: "go",
 }

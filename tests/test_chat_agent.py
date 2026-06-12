@@ -20,9 +20,11 @@ from fuzz_agent.tools._runtime import Runtime
 
 
 def test_chat_analyze_target_sets_session_target(tmp_path):
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
-    (tmp_path / "parser.py").write_text(
-        "def parse_json(data):\n    return data\n",
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = \"demo\"\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text(
+        "pub fn parse_thing(b: &[u8]) -> Result<(), ()> { let _ = b; Ok(()) }\n",
         encoding="utf-8",
     )
     session = ChatSession()
@@ -30,12 +32,12 @@ def test_chat_analyze_target_sets_session_target(tmp_path):
 
     reply = asyncio.run(agent.respond(session, f"analyze {tmp_path}"))
 
-    assert "语言: python" in reply
-    assert "parse_json" in reply
+    assert "语言: rust" in reply
+    assert "parse_thing" in reply
     assert session.target_path == str(tmp_path.resolve())
     assert session.working_memory["last_intent"] == "analyze"
     assert session.working_memory["last_command"].startswith("analyze")
-    assert "语言: python" in session.working_memory["last_reply"]
+    assert "语言: rust" in session.working_memory["last_reply"]
 
 
 def test_chat_session_memory_roundtrip():
@@ -279,9 +281,11 @@ def test_chat_run_summary_omits_large_artifact_contents(tmp_path, monkeypatch):
 
 def test_chat_llm_intent_can_parse_freeform_analyze(tmp_path, monkeypatch):
     monkeypatch.setenv("OPENAI_API_KEY", "test")
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
-    (tmp_path / "parser.py").write_text(
-        "def parse_json(data):\n    return data\n",
+    (tmp_path / "Cargo.toml").write_text("[package]\nname = \"demo\"\n", encoding="utf-8")
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "lib.rs").write_text(
+        "pub fn parse_thing(b: &[u8]) -> Result<(), ()> { let _ = b; Ok(()) }\n",
         encoding="utf-8",
     )
 
@@ -302,8 +306,8 @@ def test_chat_llm_intent_can_parse_freeform_analyze(tmp_path, monkeypatch):
 
     reply = asyncio.run(agent.respond(session, "帮我看一下这个项目"))
 
-    assert "语言: python" in reply
-    assert "parse_json" in reply
+    assert "语言: rust" in reply
+    assert "parse_thing" in reply
 
 
 def test_chat_trace_summarizes_agent_trace(tmp_path, monkeypatch):

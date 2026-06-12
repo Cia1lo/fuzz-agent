@@ -18,7 +18,6 @@ from .state.store import CampaignStore
 _ENGINE_CHOICES = [
     EngineKind.LIBFUZZER.value,
     EngineKind.CARGO_FUZZ.value,
-    EngineKind.ATHERIS.value,
     "cargo_fuzz",
 ]
 

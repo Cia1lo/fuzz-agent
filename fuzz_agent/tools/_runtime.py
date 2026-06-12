@@ -14,7 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Optional
 
-from ..engines import AtherisEngine, CargoFuzzEngine, LibFuzzerEngine
+from ..engines import CargoFuzzEngine, LibFuzzerEngine
 from ..engines.base import FuzzEngine
 from ..events.stream import EventBus
 from .. import sandbox
@@ -31,7 +31,6 @@ class Runtime:
         self._engines: dict[EngineKind, FuzzEngine] = {
             EngineKind.LIBFUZZER: LibFuzzerEngine(sandbox=selected_sandbox),
             EngineKind.CARGO_FUZZ: CargoFuzzEngine(sandbox=selected_sandbox),
-            EngineKind.ATHERIS: AtherisEngine(),
         }
         # campaign_id -> (engine, future)
         self.running: dict[str, tuple[FuzzEngine, concurrent.futures.Future[Any]]] = {}

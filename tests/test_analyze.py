@@ -17,19 +17,6 @@ def test_analyze_rust_target_detects_entry_point(tmp_path):
     assert "parse_thing" in profile.entry_points
 
 
-def test_analyze_python_target_detects_entry_point(tmp_path):
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"demo\"\n", encoding="utf-8")
-    (tmp_path / "parser.py").write_text(
-        "def parse_json(data):\n    return data\n",
-        encoding="utf-8",
-    )
-
-    profile = analyze_target(str(tmp_path))
-
-    assert profile.language is Language.PYTHON
-    assert "parse_json" in profile.entry_points
-
-
 def test_analyze_cpp_detects_lowercase_and_byte_signature_entries(tmp_path):
     (tmp_path / "CMakeLists.txt").write_text("project(demo)\n", encoding="utf-8")
     (tmp_path / "parser.cc").write_text(

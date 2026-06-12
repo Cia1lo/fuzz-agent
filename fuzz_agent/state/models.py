@@ -18,7 +18,6 @@ class Language(str, Enum):
     CPP = "cpp"
     RUST = "rust"
     GO = "go"
-    PYTHON = "python"
     JAVA = "java"
     UNKNOWN = "unknown"
 
@@ -28,7 +27,6 @@ class EngineKind(str, Enum):
     CARGO_FUZZ = "cargo-fuzz"
     AFLPP = "aflpp"
     GO_NATIVE = "go_native"
-    ATHERIS = "atheris"
     JAZZER = "jazzer"
 
 

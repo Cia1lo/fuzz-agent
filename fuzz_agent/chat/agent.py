@@ -96,7 +96,7 @@ Return strict JSON only:
   "path": null|string,
   "campaign_id": null|string,
   "duration_sec": null|integer,
-  "engine": null|"libfuzzer"|"cargo-fuzz"|"atheris",
+  "engine": null|"libfuzzer"|"cargo-fuzz",
   "top_n": null|integer,
   "reply": null|string
 }
@@ -1143,7 +1143,7 @@ def _help_text() -> str:
     return (
         "可用对话命令：\n"
         "- `analyze <path>`：分析目标目录\n"
-        "- `run <path> 30m [libfuzzer|cargo-fuzz|atheris]`：运行一次完整 fuzz campaign\n"
+        "- `run <path> 30m [libfuzzer|cargo-fuzz]`：运行一次完整 fuzz campaign\n"
         "- `status [campaign_id]`：查看状态\n"
         "- `stop [campaign_id]`：停止运行中的 campaign\n"
         "- `resume <campaign_id> [10m]`：从已有 corpus 恢复\n"

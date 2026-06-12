@@ -2,7 +2,7 @@
 
 Compiles a harness with clang+sanitizers, runs the resulting binary, and
 translates its stdout into typed FuzzEvents. This is the reference engine —
-other adapters (AFL++, Atheris, Jazzer) follow the same shape.
+other adapters (AFL++, Jazzer) follow the same shape.
 """
 from __future__ import annotations
 
