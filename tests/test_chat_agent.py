@@ -203,7 +203,19 @@ def test_chat_run_summary_includes_crash_details(tmp_path, monkeypatch):
     crash_input.parent.mkdir(parents=True)
     crash_input.write_bytes(b"BUG!")
     reproduce_log = crash_input.with_suffix(".log")
-    reproduce_log.write_text("SUMMARY: AddressSanitizer: SEGV parser.cc:10\n", encoding="utf-8")
+    reproduce_log.write_text(
+        "\n".join([
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1",
+            "WRITE of size 1 at 0x1 thread T0",
+            "    #0 0xaaa in ParseThing(unsigned char const*, unsigned long) parser.cc:10",
+            "0x1 is located 0 bytes after 4-byte region [0x0,0x4)",
+            "allocated by thread T0 here:",
+            "    #0 0xbbb in malloc+0x70 libclang_rt.asan.dylib",
+            "    #1 0xccc in ParseThing(unsigned char const*, unsigned long) parser.cc:5",
+            "SUMMARY: AddressSanitizer: heap-buffer-overflow parser.cc:10",
+        ]),
+        encoding="utf-8",
+    )
 
     async def fake_run(self, goal):
         return {
@@ -240,16 +252,17 @@ def test_chat_run_summary_includes_crash_details(tmp_path, monkeypatch):
     reply = asyncio.run(agent.respond(session, "run 1s"))
 
     assert "发现 1 个 crash" in reply
+    assert "结果解读" in reply
     assert "`abc`" in reply
     assert "输入预览是 `BUG!`" in reply
     assert "复现日志在" in reply
     assert "ParseThing parser.cc:10" in reply
+    assert "写入 1 字节" in reply
+    assert "0 bytes after 4-byte region" in reply
+    assert "ParseThing(unsigned char const*, unsigned long) parser.cc:5" in reply
     assert "Null pointer dereference (CWE-476)" in reply
-    assert "保存内容" in reply
-    assert "crash input `abc`" in reply
-    assert "42 55 47 21" in reply
-    assert "base64: `QlVHIQ==`" in reply
-    assert "SUMMARY: AddressSanitizer" in reply
+    assert "保存内容" not in reply
+    assert "SUMMARY: AddressSanitizer" not in reply
 
 
 def test_chat_run_summary_omits_large_artifact_contents(tmp_path, monkeypatch):
@@ -275,7 +288,7 @@ def test_chat_run_summary_omits_large_artifact_contents(tmp_path, monkeypatch):
     reply = asyncio.run(agent.respond(session, "run 1s"))
 
     assert "run log" in reply
-    assert "超过 8192 bytes，已省略" in reply
+    assert "完整运行记录" in reply
     assert "AAAAA" not in reply
 
 

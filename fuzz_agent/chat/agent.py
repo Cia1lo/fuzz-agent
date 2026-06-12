@@ -132,6 +132,16 @@ class ChatIntent:
     reply: str | None = None
 
 
+@dataclass(frozen=True)
+class CrashExplanation:
+    problem: str = ""
+    sanitizer: str = ""
+    access: str = ""
+    location: str = ""
+    boundary: str = ""
+    allocation: str = ""
+
+
 class ConversationAgent:
     """Chat layer that maps user messages onto existing tools."""
 
@@ -700,9 +710,6 @@ def _format_campaign_summary(summary: dict[str, Any]) -> str:
     artifact_text = _artifact_sentence(paths, has_crashes=has_crashes)
     if artifact_text:
         lines.extend(["", artifact_text])
-    artifact_sections = _inline_artifact_sections(paths, crashes)
-    if artifact_sections:
-        lines.extend(["", "保存内容", *artifact_sections])
     lines.extend(["", *_next_step_lines(str(cid), status, has_crashes)])
     return "\n".join(lines)
 
@@ -831,38 +838,178 @@ def _campaign_overview_sentence(cid: str, stats: dict[str, Any]) -> str:
 
 
 def _format_crash_summary(crashes: list[dict[str, Any]], paths: dict[str, Any]) -> list[str]:
-    lines = [f"Crash 详情里带回了 {len(crashes)} 条记录。"]
+    lines = [
+        "结果解读",
+        f"Crash 详情里带回了 {len(crashes)} 条记录。下面是面向判断的摘要，不需要先读原始日志。",
+    ]
     for idx, crash in enumerate(crashes[:5], start=1):
         crash_id = str(crash.get("crash_id") or "unknown")
         status = str(crash.get("status") or "unknown")
         kind = str(crash.get("sanitizer_kind") or "unknown")
-        input_path = str(crash.get("input_path") or "")
-        minimized_path = str(crash.get("minimized_path") or "")
-        reproduce_log = str(crash.get("reproduce_log_path") or "")
+        explanation = _crash_explanation(crash)
+        title = explanation.problem or kind
         lines.append(
-            f"{idx}. Crash `{crash_id}` 当前是 `{status}`，sanitizer kind 是 `{kind}`。"
+            f"{idx}. Crash `{crash_id}` 当前是 `{status}`，主要问题是 {title}。"
         )
-        if input_path:
-            lines.append(f"   触发输入保存在 `{input_path}`。")
-            preview = _input_preview(Path(input_path))
-            if preview:
-                lines.append(f"   输入预览是 `{preview}`。")
-        if minimized_path:
-            lines.append(f"   最小化后的输入在 `{minimized_path}`。")
-        if reproduce_log:
-            lines.append(f"   复现日志在 `{reproduce_log}`。")
-        frame = _first_frame(crash)
-        if frame:
-            lines.append(f"   栈顶证据指向 {frame}。")
+        lines.extend(_format_crash_explanation(crash, explanation))
         matches = _vulnerability_matches(crash)
-        if matches:
-            lines.append(f"   规则匹配结果是 {matches[0]}。")
+        if matches and matches[0] != title:
+            lines.append(f"   漏洞分类: {matches[0]}。")
+        if kind == "unknown" and explanation.sanitizer:
+            lines.append(f"   sanitizer: {explanation.sanitizer}。")
     if len(crashes) > 5:
         lines.append(f"还有 {len(crashes) - 5} 个 crash 没有在这条回复里展开。")
     crash_dir = str(paths.get("crash_dir") or "")
     if crash_dir:
-        lines.append(f"完整 crash 目录在 `{crash_dir}`。")
+        lines.append(f"完整 crash 输入和复现日志保存在 `{crash_dir}`。")
     return lines
+
+
+def _format_crash_explanation(
+    crash: dict[str, Any],
+    explanation: CrashExplanation,
+) -> list[str]:
+    lines: list[str] = []
+    if explanation.location:
+        lines.append(f"   代码位置: {explanation.location}。")
+    if explanation.access:
+        lines.append(f"   触发行为: {explanation.access}。")
+    if explanation.boundary:
+        lines.append(f"   边界说明: {explanation.boundary}。")
+    if explanation.allocation:
+        lines.append(f"   相关分配: {explanation.allocation}。")
+
+    input_path = _path_or_none(crash.get("input_path"))
+    if input_path is not None:
+        preview = _input_preview(input_path)
+        size = _file_size(input_path)
+        size_text = f"{size} bytes，" if size is not None else ""
+        if preview:
+            lines.append(f"   触发输入: {size_text}输入预览是 `{preview}`。")
+        else:
+            lines.append(f"   触发输入保存在 `{input_path}`。")
+
+    minimized_path = _path_or_none(crash.get("minimized_path"))
+    if minimized_path is not None:
+        lines.append(f"   最小化后的输入在 `{minimized_path}`。")
+
+    status = str(crash.get("status") or "unknown")
+    reproduce_log = _path_or_none(crash.get("reproduce_log_path"))
+    if status == "confirmed":
+        lines.append("   可信度: 已复现，属于 confirmed crash。")
+    elif status != "unknown":
+        lines.append(f"   可信度: 当前状态是 `{status}`，需要结合复现结果判断。")
+    if reproduce_log is not None:
+        lines.append(f"   复现日志在 `{reproduce_log}`；这里已提取关键结论，不展开原始日志。")
+    return lines
+
+
+def _crash_explanation(crash: dict[str, Any]) -> CrashExplanation:
+    log = _read_text_for_summary(crash.get("reproduce_log_path"))
+    matches = _vulnerability_matches(crash)
+    problem = matches[0] if matches else ""
+    sanitizer = ""
+    if log:
+        sanitizer, sanitizer_problem = _asan_problem(log)
+        problem = problem or sanitizer_problem
+    if not problem:
+        problem = str(crash.get("sanitizer_kind") or "unknown")
+    return CrashExplanation(
+        problem=problem,
+        sanitizer=sanitizer,
+        access=_asan_access(log),
+        location=_first_frame(crash) or _top_log_frame(log),
+        boundary=_asan_boundary(log),
+        allocation=_asan_allocation_frame(log),
+    )
+
+
+def _asan_problem(log: str) -> tuple[str, str]:
+    match = re.search(r"ERROR:\s+([^:]+):\s+([^\s]+)", log)
+    if not match:
+        return "", ""
+    sanitizer = match.group(1).strip()
+    kind = match.group(2).strip()
+    return sanitizer, _friendly_sanitizer_kind(kind)
+
+
+def _friendly_sanitizer_kind(kind: str) -> str:
+    labels = {
+        "heap-buffer-overflow": "堆缓冲区越界",
+        "stack-buffer-overflow": "栈缓冲区越界",
+        "global-buffer-overflow": "全局缓冲区越界",
+        "use-after-free": "释放后使用",
+        "double-free": "重复释放",
+        "bad-free": "非法释放",
+        "null-dereference": "空指针解引用",
+        "integer-overflow": "整数溢出",
+        "signed-integer-overflow": "有符号整数溢出",
+    }
+    label = labels.get(kind)
+    return f"{label} ({kind})" if label else kind
+
+
+def _asan_access(log: str) -> str:
+    match = re.search(r"\b(READ|WRITE) of size (\d+)", log)
+    if not match:
+        return ""
+    op = "读取" if match.group(1) == "READ" else "写入"
+    return f"{op} {match.group(2)} 字节"
+
+
+def _asan_boundary(log: str) -> str:
+    match = re.search(r"\bis located ([^\n]+)", log)
+    if not match:
+        return ""
+    return _shorten(match.group(1).strip(), 180)
+
+
+def _asan_allocation_frame(log: str) -> str:
+    _, marker, tail = log.partition("allocated by thread")
+    if not marker:
+        return ""
+    for line in tail.splitlines()[:12]:
+        frame = _frame_from_log_line(line)
+        if not frame:
+            continue
+        lower = frame.lower()
+        if "malloc" in lower or "operator new" in lower or "libclang_rt" in lower:
+            continue
+        return frame
+    return ""
+
+
+def _top_log_frame(log: str) -> str:
+    for line in log.splitlines():
+        frame = _frame_from_log_line(line)
+        if frame:
+            return frame
+    return ""
+
+
+def _frame_from_log_line(line: str) -> str:
+    match = re.search(r"^\s*#\d+\s+0x[0-9a-fA-F]+\s+in\s+(.+)$", line)
+    if not match:
+        return ""
+    return _shorten(match.group(1).strip(), 220)
+
+
+def _read_text_for_summary(value: Any, limit: int = 128 * 1024) -> str:
+    path = _path_or_none(value)
+    if path is None or not path.is_file():
+        return ""
+    try:
+        data = path.read_bytes()[:limit]
+    except OSError:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def _file_size(path: Path) -> int | None:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return None
 
 
 def _artifact_sentence(paths: dict[str, Any], *, has_crashes: bool) -> str:
@@ -1068,17 +1215,17 @@ def _looks_binary(data: bytes) -> bool:
 def _next_step_lines(cid: str, status: str, has_crashes: bool) -> list[str]:
     if has_crashes:
         return [
-            f"下一步可以输入 `triage {cid}` 查看或刷新 crash 分诊结果。",
-            f"如果上面有过大的 artifact 被省略，完整视图仍在 `/campaigns/{cid}`。",
+            f"下一步可以输入 `triage {cid}` 刷新分诊结果，确认是否还有重复或新分类。",
+            f"完整原始日志、harness 和 artifact 可在 `/campaigns/{cid}` 查看。",
         ]
     if status == "failed":
         return [
-            "下一步优先看 run log 和 agent trace，确认是引擎错误、环境问题还是目标程序异常退出。",
-            f"如果上面有过大的 artifact 被省略，完整视图仍在 `/campaigns/{cid}`。",
+            "下一步优先查看 agent trace 和错误事件，确认是引擎错误、环境问题还是目标程序异常退出。",
+            f"完整原始日志和 artifact 可在 `/campaigns/{cid}` 查看。",
         ]
     return [
         "下一步可以延长运行时间继续探索，或查看 coverage 结果寻找未覆盖路径。",
-        f"如果上面有过大的 artifact 被省略，完整视图仍在 `/campaigns/{cid}`。",
+        f"完整运行记录和 artifact 可在 `/campaigns/{cid}` 查看。",
     ]
 
 
