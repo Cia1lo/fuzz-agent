@@ -14,6 +14,7 @@ from ..agent_harness.validators import validate_crash_not_from_harness
 from ..state.models import BuildArtifact, CrashRecord, CrashStatus
 from ..state.store import CampaignStore
 from ..subagents.crash_triage import run as crash_triage
+from ..subagents.exploit_assessor import run as assess_exploitability
 from ..subagents.vulnerability_matcher import run as vulnerability_matcher
 from ._runtime import runtime
 
@@ -27,6 +28,7 @@ def triage_crashes_impl(campaign_id: str, top_n: int) -> list[CrashRecord]:
         unmatched_out: list[CrashRecord] = []
         for c in crashes:
             updated = _with_vulnerability_matches(c, None, _default_log_path(c.input_path))
+            updated = _with_exploitability_assessment(updated, paths["base"])
             rt.store.save_crash(updated)
             unmatched_out.append(updated)
         return unmatched_out
@@ -50,6 +52,7 @@ def triage_crashes_impl(campaign_id: str, top_n: int) -> list[CrashRecord]:
             reproduce_log_path=log_path if log_path.exists() else None,
         )
         updated = _with_vulnerability_matches(updated, report, log_path)
+        updated = _with_exploitability_assessment(updated, _source_root_from_artifact(cfg.artifact))
         rt.store.save_crash(updated)
         _record_crash_reproduce_observation(
             rt.store,
@@ -61,6 +64,24 @@ def triage_crashes_impl(campaign_id: str, top_n: int) -> list[CrashRecord]:
         )
         out.append(updated)
     return out
+
+
+def _with_exploitability_assessment(crash: CrashRecord, source_root: Path) -> CrashRecord:
+    return assess_exploitability(crash, source_root)
+
+
+def _source_root_from_artifact(artifact: BuildArtifact) -> Path:
+    for path in (artifact.harness_source_path, artifact.binary_path):
+        if path is None:
+            continue
+        parts = path.parts
+        if ".fuzz" in parts:
+            idx = parts.index(".fuzz")
+            if idx > 0:
+                return Path(*parts[:idx])
+    if artifact.harness_source_path is not None:
+        return artifact.harness_source_path.parent
+    return artifact.binary_path.parent
 
 
 def _default_log_path(input_path: Path) -> Path:

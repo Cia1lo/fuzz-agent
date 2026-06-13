@@ -373,7 +373,11 @@ class Orchestrator:
                 artifact.harness_source_path if artifact else None,
                 _read_crash_report(c.reproduce_log_path),
             )
-            assessed = assess_exploitability(c, goal.target_path)
+            assessed = (
+                c
+                if c.severity is not None or c.exploitability_notes
+                else assess_exploitability(c, goal.target_path)
+            )
             if not harness_check.passed:
                 self.store.record_event(FuzzEvent(
                     kind=EventKind.ENGINE_ERROR, campaign_id=cid,

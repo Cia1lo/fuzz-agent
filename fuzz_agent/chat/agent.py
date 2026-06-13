@@ -1029,8 +1029,6 @@ def _format_crashes(cid: str, crashes: list[CrashRecord]) -> str:
         matches = _vulnerability_matches(crash_dict)
         if matches and matches[0] != title:
             lines.append(f"   漏洞分类: {matches[0]}。")
-        if crash.exploitability_notes:
-            lines.append(f"   可利用性说明: {_shorten(crash.exploitability_notes, 180)}")
     if len(crashes) > 5:
         lines.append(f"- 还有 {len(crashes) - 5} 个 crash 未展示")
     lines.extend([
@@ -1045,6 +1043,8 @@ def _crash_record_to_summary_dict(crash: CrashRecord) -> dict[str, Any]:
     return {
         "crash_id": crash.crash_id,
         "status": crash.status.value,
+        "severity": crash.severity.value if crash.severity else None,
+        "exploitability_notes": crash.exploitability_notes,
         "sanitizer_kind": crash.sanitizer_kind,
         "input_path": str(crash.input_path),
         "minimized_path": str(crash.minimized_path) if crash.minimized_path else "",
@@ -1148,6 +1148,7 @@ def _format_crash_explanation(
         lines.append(f"   边界说明: {explanation.boundary}。")
     if explanation.allocation:
         lines.append(f"   相关分配: {explanation.allocation}。")
+    lines.extend(_format_severity_analysis(crash))
 
     input_path = _path_or_none(crash.get("input_path"))
     if input_path is not None:
@@ -1171,6 +1172,21 @@ def _format_crash_explanation(
         lines.append(f"   可信度: 当前状态是 `{status}`，需要结合复现结果判断。")
     if reproduce_log is not None:
         lines.append(f"   复现日志在 `{reproduce_log}`；这里已提取关键结论，不展开原始日志。")
+    return lines
+
+
+def _format_severity_analysis(crash: dict[str, Any]) -> list[str]:
+    severity = _optional_str(crash.get("severity"))
+    notes = _optional_str(crash.get("exploitability_notes"))
+    lines: list[str] = []
+    if severity:
+        lines.append(f"   危害程度: {severity.upper()}（LLM 评估）。")
+    if notes:
+        if notes.startswith("assessor_failed:"):
+            if not severity:
+                lines.append(f"   危害程度: 暂无（LLM 评估失败: {_shorten(notes, 160)}）。")
+        else:
+            lines.append(f"   危害分析: {_shorten(notes, 220)}")
     return lines
 
 

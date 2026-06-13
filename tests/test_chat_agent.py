@@ -13,6 +13,7 @@ from fuzz_agent.state.models import (
     CrashRecord,
     CrashStatus,
     EngineKind,
+    Severity,
 )
 from fuzz_agent.state.store import CampaignStore
 from fuzz_agent.tools import _runtime
@@ -407,6 +408,8 @@ def test_chat_triage_includes_crash_artifacts(tmp_path, monkeypatch):
         status=CrashStatus.CONFIRMED,
         reproducible=True,
         reproduce_log_path=reproduce_log,
+        severity=Severity.HIGH,
+        exploitability_notes="LLM: attacker-controlled input reaches a heap write.",
     )
     monkeypatch.setattr("fuzz_agent.chat.agent.tools.triage_crashes", lambda *_args, **_kwargs: [crash])
     session = ChatSession(active_campaign_id="cid789")
@@ -421,6 +424,8 @@ def test_chat_triage_includes_crash_artifacts(tmp_path, monkeypatch):
     assert "ParseThing parser.cc:10" in reply
     assert "写入 1 字节" in reply
     assert "0 bytes after 4-byte region" in reply
+    assert "危害程度: HIGH（LLM 评估）" in reply
+    assert "危害分析: LLM: attacker-controlled input reaches a heap write." in reply
     assert "status=confirmed" not in reply
 
 

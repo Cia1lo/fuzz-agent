@@ -125,6 +125,8 @@ def triage(campaign_id: str, top: int) -> None:
         {"crash_id": c.crash_id, "stack_hash": c.stack_hash,
          "sanitizer_kind": c.sanitizer_kind, "top_frames": c.top_frames,
          "status": c.status.value, "reproducible": c.reproducible,
+         "severity": c.severity.value if c.severity else None,
+         "exploitability_notes": c.exploitability_notes,
          "vulnerability_matches": [
              {"rule_id": m.rule_id, "title": m.title, "cwe": m.cwe,
               "confidence": m.confidence, "source": m.source}
