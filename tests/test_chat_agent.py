@@ -347,7 +347,18 @@ def test_chat_triage_includes_crash_artifacts(tmp_path, monkeypatch):
     crash_input.parent.mkdir()
     crash_input.write_bytes(b"BUG!")
     reproduce_log = crash_input.with_suffix(".log")
-    reproduce_log.write_text("SUMMARY: AddressSanitizer: SEGV parser.cc:10\n", encoding="utf-8")
+    reproduce_log.write_text(
+        "\n".join([
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1",
+            "WRITE of size 1 at 0x1 thread T0",
+            "    #0 0xaaa in ParseThing(unsigned char const*, unsigned long) parser.cc:10",
+            "0x1 is located 0 bytes after 4-byte region [0x0,0x4)",
+            "allocated by thread T0 here:",
+            "    #0 0xbbb in malloc+0x70 libclang_rt.asan.dylib",
+            "    #1 0xccc in ParseThing(unsigned char const*, unsigned long) parser.cc:5",
+        ]),
+        encoding="utf-8",
+    )
     crash = CrashRecord(
         crash_id="abc",
         campaign_id="cid789",
@@ -368,9 +379,13 @@ def test_chat_triage_includes_crash_artifacts(tmp_path, monkeypatch):
     reply = asyncio.run(agent.respond(session, "triage"))
 
     assert "campaign `cid789` crash 分诊结果" in reply
-    assert "input preview: `BUG!`" in reply
-    assert "reproduce log:" in reply
+    assert "结果解读" in reply
+    assert "输入预览是 `BUG!`" in reply
+    assert "复现日志在" in reply
     assert "ParseThing parser.cc:10" in reply
+    assert "写入 1 字节" in reply
+    assert "0 bytes after 4-byte region" in reply
+    assert "status=confirmed" not in reply
 
 
 def test_chat_stop_calls_tool_for_active_campaign(tmp_path, monkeypatch):

@@ -758,38 +758,50 @@ def _format_crashes(cid: str, crashes: list[CrashRecord]) -> str:
         "结果",
         f"campaign `{cid}` crash 分诊结果如下，共 {len(crashes)} 个结果。",
         "",
-        "Crash 证据",
+        "结果解读",
     ]
     for idx, crash in enumerate(crashes[:5], start=1):
-        frames = "; ".join(crash.top_frames[:3])
+        crash_dict = _crash_record_to_summary_dict(crash)
+        explanation = _crash_explanation(crash_dict)
+        title = explanation.problem or crash.sanitizer_kind or "unknown"
         lines.append(
-            f"{idx}. `{crash.crash_id}` status={crash.status.value} "
-            f"kind={crash.sanitizer_kind or 'unknown'} frames={frames}"
+            f"{idx}. Crash `{crash.crash_id}` 当前是 `{crash.status.value}`，主要问题是 {title}。"
         )
-        lines.extend(_format_crash_record_details(crash))
+        lines.extend(_format_crash_explanation(crash_dict, explanation))
+        matches = _vulnerability_matches(crash_dict)
+        if matches and matches[0] != title:
+            lines.append(f"   漏洞分类: {matches[0]}。")
+        if crash.exploitability_notes:
+            lines.append(f"   可利用性说明: {_shorten(crash.exploitability_notes, 180)}")
     if len(crashes) > 5:
         lines.append(f"- 还有 {len(crashes) - 5} 个 crash 未展示")
-    lines.extend(["", "下一步", f"- 打开 campaign 页面 `/campaigns/{cid}` 查看 run log、harness 和 artifact。"])
+    lines.extend([
+        "",
+        "下一步",
+        f"- 需要原始证据时，打开 campaign 页面 `/campaigns/{cid}` 查看 run log、harness 和 artifact。",
+    ])
     return "\n".join(lines)
 
 
-def _format_crash_record_details(crash: CrashRecord) -> list[str]:
-    lines: list[str] = []
-    lines.append(f"  input: `{crash.input_path}`")
-    preview = _input_preview(crash.input_path)
-    if preview:
-        lines.append(f"  input preview: `{preview}`")
-    if crash.minimized_path:
-        lines.append(f"  minimized: `{crash.minimized_path}`")
-    if crash.reproduce_log_path:
-        lines.append(f"  reproduce log: `{crash.reproduce_log_path}`")
-    if crash.vulnerability_matches:
-        match = crash.vulnerability_matches[0]
-        suffix = f" ({match.cwe})" if match.cwe else ""
-        lines.append(f"  match: {match.title}{suffix}")
-    if crash.exploitability_notes:
-        lines.append(f"  notes: {_shorten(crash.exploitability_notes, 180)}")
-    return lines
+def _crash_record_to_summary_dict(crash: CrashRecord) -> dict[str, Any]:
+    return {
+        "crash_id": crash.crash_id,
+        "status": crash.status.value,
+        "sanitizer_kind": crash.sanitizer_kind,
+        "input_path": str(crash.input_path),
+        "minimized_path": str(crash.minimized_path) if crash.minimized_path else "",
+        "reproduce_log_path": str(crash.reproduce_log_path) if crash.reproduce_log_path else "",
+        "top_frames": crash.top_frames,
+        "vulnerability_matches": [
+            {
+                "title": match.title,
+                "cwe": match.cwe,
+                "confidence": match.confidence,
+                "rule_id": match.rule_id,
+            }
+            for match in crash.vulnerability_matches
+        ],
+    }
 
 
 def _summary_crashes(summary: dict[str, Any]) -> list[dict[str, Any]]:
