@@ -730,18 +730,276 @@ def _format_stats(stats: CampaignStats) -> str:
 def _format_trace(cid: str, trace: list[dict[str, Any]]) -> str:
     if not trace:
         return f"campaign `{cid}` 暂无 agent trace。"
-    lines = [f"campaign `{cid}` 最近 {min(5, len(trace))} 条 agent trace:"]
-    for i, row in enumerate(trace[-5:], start=max(1, len(trace) - 4)):
-        decision = _dict_field(row, "decision")
-        observation = _dict_field(row, "observation")
-        action = decision.get("action", "")
-        reason = decision.get("reason", "")
-        phase = row.get("phase", "")
-        diagnostics = _shorten(str(observation.get("diagnostics", "")), 180)
-        lines.append(f"{i}. {phase}: {action} - {reason}")
-        if diagnostics:
-            lines.append(f"   诊断: {diagnostics}")
+    recent = trace[-5:]
+    lines = [
+        "结果",
+        f"campaign `{cid}` 最近 {len(recent)} 条 agent trace。",
+        "",
+        "决策解读",
+    ]
+    for i, row in enumerate(recent, start=max(1, len(trace) - len(recent) + 1)):
+        lines.extend(_format_trace_record(i, row))
+    lines.extend([
+        "",
+        "下一步",
+        "- 如果要理解 crash 本身，使用 `triage`；如果要审计 agent 为什么这样做，继续看 trace。",
+        f"- 完整 agent_trace JSONL 可在 `/campaigns/{cid}` 查看。",
+    ])
     return "\n".join(lines)
+
+
+def _format_trace_record(index: int, row: dict[str, Any]) -> list[str]:
+    phase = str(row.get("phase") or "unknown")
+    observation = _dict_field(row, "observation")
+    decision = _dict_field(row, "decision")
+    action = _dict_field(row, "action")
+    result = _dict_field(row, "result")
+    score = _dict_field(row, "score")
+    action_name = str(decision.get("action") or "")
+    reason = str(decision.get("reason") or "")
+
+    lines = [f"{index}. {_trace_title(phase, action_name, result)}"]
+    lines.append(f"   阶段: {_trace_phase_label(phase)}。")
+    if reason:
+        lines.append(f"   决策原因: {_shorten(reason, 180)}。")
+
+    detail_lines = _trace_phase_details(phase, observation, action, result, score)
+    lines.extend(f"   {line}" for line in detail_lines)
+
+    diagnostics = "" if phase == "crash_reproduce" else _trace_diagnostics_summary(observation)
+    if diagnostics:
+        lines.append(f"   关键诊断: {diagnostics}")
+    return lines
+
+
+def _trace_title(phase: str, action: str, result: dict[str, Any]) -> str:
+    if phase == "harness_attempt":
+        if action == "accept_harness" or result.get("accepted") is True:
+            return "Harness 已通过验证并被接受"
+        if action == "regenerate_harness":
+            return "Harness 未通过验证，准备重新生成"
+        return "Harness 尝试已记录"
+    if phase == "crash_reproduce":
+        if result.get("reproducible") is True:
+            return "Crash 复现证据已记录"
+        return "Crash 复现结果已记录"
+    if phase == "coverage_plateau":
+        return "覆盖停滞，已生成探索策略"
+    if phase == "coverage_delta":
+        return "策略变更后的覆盖变化已评估"
+    if phase == "coverage_input_model":
+        return "根据覆盖输入模型重新生成 harness"
+    return f"{phase}: {action or 'record'}"
+
+
+def _trace_phase_label(phase: str) -> str:
+    labels = {
+        "harness_attempt": "Harness 生成/验证",
+        "crash_reproduce": "Crash 复现与证据记录",
+        "coverage_plateau": "Coverage 停滞处理",
+        "coverage_delta": "Coverage 策略效果评估",
+        "coverage_input_model": "Coverage-guided harness 重建",
+    }
+    return labels.get(phase, phase)
+
+
+def _trace_phase_details(
+    phase: str,
+    observation: dict[str, Any],
+    action: dict[str, Any],
+    result: dict[str, Any],
+    score: dict[str, Any],
+) -> list[str]:
+    if phase == "harness_attempt":
+        return _trace_harness_details(observation, result, score)
+    if phase == "crash_reproduce":
+        return _trace_crash_reproduce_details(observation, result, score)
+    if phase == "coverage_plateau":
+        return _trace_coverage_plateau_details(result, score)
+    if phase == "coverage_delta":
+        return _trace_coverage_delta_details(result, score)
+    if phase == "coverage_input_model":
+        return _trace_input_model_details(observation, action, result, score)
+    return []
+
+
+def _trace_harness_details(
+    observation: dict[str, Any],
+    result: dict[str, Any],
+    score: dict[str, Any],
+) -> list[str]:
+    lines: list[str] = []
+    attempt = observation.get("attempt")
+    entry = observation.get("entry")
+    if attempt or entry:
+        parts = []
+        if attempt:
+            parts.append(f"第 {attempt} 次尝试")
+        if entry:
+            parts.append(f"入口 `{entry}`")
+        lines.append("对象: " + "，".join(parts) + "。")
+
+    validations = _trace_validation_summary(observation)
+    if validations:
+        lines.append(f"验证结果: {validations}。")
+    elif score:
+        lines.append(f"验证结果: {_trace_score_summary(score)}。")
+
+    if result.get("accepted") is True:
+        lines.append("结论: 这个 harness 可以进入正式 fuzz。")
+    elif result:
+        lines.append("结论: harness 还没有被接受，需要看失败验证或下一次尝试。")
+    return lines
+
+
+def _trace_crash_reproduce_details(
+    observation: dict[str, Any],
+    result: dict[str, Any],
+    score: dict[str, Any],
+) -> list[str]:
+    lines: list[str] = []
+    crash_id = result.get("crash_id") or _dict_field(observation, "artifacts").get("crash_id")
+    status = result.get("status")
+    if crash_id or status:
+        parts = []
+        if crash_id:
+            parts.append(f"crash `{crash_id}`")
+        if status:
+            parts.append(f"状态 `{status}`")
+        lines.append("对象: " + "，".join(parts) + "。")
+    if result.get("reproducible") is True:
+        lines.append("复现结果: 已复现，说明该 crash 不是一次性偶发。")
+    elif result.get("reproducible") is False:
+        lines.append("复现结果: 未复现或不稳定，需要继续确认。")
+
+    harness_fault = score.get("harness_fault_detected")
+    if harness_fault is True:
+        lines.append("Harness 归因: 可能是 harness 自身导致，需要优先检查 harness。")
+    elif harness_fault is False:
+        lines.append("Harness 归因: 当前证据没有指向 harness 自身错误。")
+
+    log = str(observation.get("diagnostics") or "")
+    problem = _trace_crash_problem(log)
+    if problem:
+        lines.append(problem)
+    return lines
+
+
+def _trace_coverage_plateau_details(
+    result: dict[str, Any],
+    score: dict[str, Any],
+) -> list[str]:
+    lines: list[str] = []
+    seeds = _int_value(score.get("added_seed_count"))
+    dict_tokens = _int_value(score.get("dict_addition_count"))
+    confidence = score.get("input_model_confidence")
+    lines.append(
+        f"策略产出: 新增 seed {seeds} 个，dictionary token {dict_tokens} 个。"
+    )
+    if isinstance(confidence, (int, float)) and confidence > 0:
+        lines.append(f"输入模型置信度: {confidence:.2f}。")
+    input_model_path = result.get("input_model_path")
+    if input_model_path:
+        lines.append(f"输入模型: `{input_model_path}`。")
+    return lines
+
+
+def _trace_coverage_delta_details(
+    result: dict[str, Any],
+    score: dict[str, Any],
+) -> list[str]:
+    before = result.get("edges_before", score.get("edges_before"))
+    after = result.get("edges_after", score.get("edges_after"))
+    delta = score.get("coverage_delta")
+    if before is not None and after is not None:
+        return [f"覆盖变化: edges {before} -> {after}，delta={delta}。"]
+    if delta is not None:
+        return [f"覆盖变化: delta={delta}。"]
+    return []
+
+
+def _trace_input_model_details(
+    observation: dict[str, Any],
+    action: dict[str, Any],
+    result: dict[str, Any],
+    score: dict[str, Any],
+) -> list[str]:
+    artifacts = _dict_field(observation, "artifacts")
+    input_model_path = action.get("input_model_path") or artifacts.get("input_model_path")
+    harness_source = result.get("harness_source_path") or artifacts.get("harness_source_path")
+    confidence = _dict_field(observation, "score").get(
+        "input_model_confidence",
+        score.get("input_model_confidence"),
+    )
+    lines: list[str] = []
+    if input_model_path:
+        lines.append(f"输入模型: `{input_model_path}`。")
+    if harness_source:
+        lines.append(f"新 harness: `{harness_source}`。")
+    if isinstance(confidence, (int, float)):
+        lines.append(f"输入模型置信度: {confidence:.2f}。")
+    return lines
+
+
+def _trace_validation_summary(observation: dict[str, Any]) -> str:
+    validations = observation.get("validations")
+    if not isinstance(validations, list):
+        return ""
+    parts: list[str] = []
+    for item in validations:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "validation")
+        passed = item.get("passed")
+        label = "通过" if passed is True else "失败" if passed is False else "未知"
+        detail = str(item.get("detail") or "")
+        if detail:
+            parts.append(f"{name} {label} ({_shorten(detail, 80)})")
+        else:
+            parts.append(f"{name} {label}")
+    return "；".join(parts)
+
+
+def _trace_score_summary(score: dict[str, Any]) -> str:
+    labels = {
+        "compiled": "编译",
+        "smoke_passed": "smoke run",
+        "target_reached": "target reached",
+    }
+    parts: list[str] = []
+    for key, label in labels.items():
+        value = score.get(key)
+        if value is True:
+            parts.append(f"{label} 通过")
+        elif value is False:
+            parts.append(f"{label} 失败")
+    return "；".join(parts) or "暂无结构化验证分数"
+
+
+def _trace_diagnostics_summary(observation: dict[str, Any]) -> str:
+    diagnostics = str(observation.get("diagnostics") or "").strip()
+    if not diagnostics:
+        return ""
+    problem = _trace_crash_problem(diagnostics)
+    if problem:
+        return problem.removesuffix("。") + "。"
+    if "INFO: Running with entropic power schedule" in diagnostics:
+        return "LibFuzzer 复现日志已记录；原始日志较长，trace 中不展开。"
+    return _shorten(diagnostics, 220)
+
+
+def _trace_crash_problem(log: str) -> str:
+    sanitizer, problem = _asan_problem(log)
+    if not sanitizer and not problem:
+        return ""
+    pieces = [f"日志信号: {problem or sanitizer}"]
+    access = _asan_access(log)
+    if access:
+        pieces.append(access)
+    location = _top_log_frame(log)
+    if location:
+        pieces.append(location)
+    return "，".join(pieces) + "。"
 
 
 def _dict_field(row: dict[str, Any], key: str) -> dict[str, Any]:

@@ -337,9 +337,45 @@ def test_chat_trace_summarizes_agent_trace(tmp_path, monkeypatch):
 
     reply = asyncio.run(agent.respond(session, "trace"))
 
-    assert "harness_attempt" in reply
-    assert "regenerate_harness" in reply
+    assert "决策解读" in reply
+    assert "Harness 未通过验证，准备重新生成" in reply
+    assert "阶段: Harness 生成/验证" in reply
     assert "missing include" in reply
+
+
+def test_chat_trace_explains_crash_reproduce_without_raw_log(tmp_path, monkeypatch):
+    rt = Runtime(root=tmp_path)
+    monkeypatch.setattr(_runtime, "_singleton", rt)
+    cid = _new_test_campaign(rt)
+    rt.store.record_agent_trace(cid, {
+        "phase": "crash_reproduce",
+        "observation": {
+            "diagnostics": "\n".join([
+                "INFO: Running with entropic power schedule (0xFF, 100).",
+                "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1",
+                "WRITE of size 1 at 0x1 thread T0",
+                "    #0 0xaaa in ParseThing(unsigned char const*, unsigned long) parser.cc:10",
+            ]),
+            "artifacts": {"crash_id": "abc"},
+        },
+        "decision": {
+            "action": "record_crash",
+            "reason": "persist reproducibility and harness ownership evidence",
+        },
+        "result": {"crash_id": "abc", "status": "confirmed", "reproducible": True},
+        "score": {"harness_fault_detected": False},
+    })
+    session = ChatSession(active_campaign_id=cid)
+    agent = ConversationAgent(rt.store, rt.bus)
+
+    reply = asyncio.run(agent.respond(session, "trace"))
+
+    assert "Crash 复现证据已记录" in reply
+    assert "复现结果: 已复现" in reply
+    assert "Harness 归因: 当前证据没有指向 harness 自身错误" in reply
+    assert "日志信号: 堆缓冲区越界" in reply
+    assert "写入 1 字节" in reply
+    assert "INFO: Running with entropic power schedule" not in reply
 
 
 def test_chat_triage_includes_crash_artifacts(tmp_path, monkeypatch):
